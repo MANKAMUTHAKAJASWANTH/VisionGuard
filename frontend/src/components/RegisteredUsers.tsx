@@ -4,18 +4,20 @@ import {
   Search, 
   Trash2, 
   Edit3, 
-  ShieldAlert,
-  UserCheck,
-  X,
-  Save,
-  Camera,
-  RefreshCw,
-  AlertTriangle,
-  CheckCircle2
+  ShieldAlert, 
+  UserCheck, 
+  X, 
+  Save, 
+  Camera, 
+  RefreshCw, 
+  AlertTriangle, 
+  CheckCircle2,
+  Radio
 } from 'lucide-react';
 
 import type { User } from '../services/api';
 import { uploadImageToSupabase, isSupabaseConfigured, supabase } from '../services/supabase';
+import { serialService } from '../services/serialService';
 
 const faceapi = (window as any).faceapi;
 
@@ -23,12 +25,14 @@ interface RegisteredUsersProps {
   users: User[];
   onDeleteUser: (id: string) => void;
   onEditUser: (user: User) => void;
+  arduinoConnected?: boolean;
 }
 
 export const RegisteredUsers: React.FC<RegisteredUsersProps> = ({
   users,
   onDeleteUser,
-  onEditUser
+  onEditUser,
+  arduinoConnected = false
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [editingUser, setEditingUser] = useState<User | null>(null);
@@ -67,6 +71,8 @@ export const RegisteredUsers: React.FC<RegisteredUsersProps> = ({
 
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+
+
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -724,13 +730,14 @@ export const RegisteredUsers: React.FC<RegisteredUsersProps> = ({
                   <span>Templates Captured:</span>
                   <span>{user.totalCapturedImages || 40} frames</span>
                 </div>
+
               </div>
 
-              {/* Card Actions */}
-              <div style={{ display: 'flex', gap: '10px', width: '100%', marginTop: 'auto' }}>
+              {/* Card Profile Actions */}
+              <div style={{ display: 'flex', gap: '8px', width: '100%', marginTop: 'auto' }}>
                 <button
                   className="btn-3d btn-secondary"
-                  style={{ flex: 1, padding: '8px', fontSize: '0.8rem', gap: '6px' }}
+                  style={{ flex: 1, padding: '8px', fontSize: '0.78rem', gap: '6px' }}
                   onClick={() => openEditModal(user)}
                 >
                   <Edit3 size={12} />
@@ -738,7 +745,7 @@ export const RegisteredUsers: React.FC<RegisteredUsersProps> = ({
                 </button>
                 <button
                   className="btn-3d btn-red"
-                  style={{ flex: 1, padding: '8px', fontSize: '0.8rem', gap: '6px' }}
+                  style={{ flex: 1, padding: '8px', fontSize: '0.78rem', gap: '6px' }}
                   onClick={() => handleConfirmDelete(user.id)}
                 >
                   <Trash2 size={12} />

@@ -20,6 +20,8 @@ interface Log {
   time: string;
   confidence: number;
   photoUrl?: string;
+  image_url?: string;   // Supabase Storage public URL (for unauthorized snapshots)
+  image_path?: string;  // Supabase Storage path
   user_id?: string;
   userId?: string;
   designation?: string;
@@ -31,6 +33,7 @@ interface Log {
   spoof_reason?: string | null;
   liveness_score?: number | null;
   face_count?: number;
+  auth_method?: string;
 }
 
 interface DetectionLogsProps {
@@ -393,9 +396,9 @@ export const DetectionLogs: React.FC<DetectionLogsProps> = ({ logs, onDeleteLog 
                   >
                     {/* PHOTO */}
                     <td style={{ textAlign: 'center', verticalAlign: 'middle' }}>
-                      {log.photoUrl ? (
+                      {(log.photoUrl || log.image_url) ? (
                         <img 
-                          src={log.photoUrl} 
+                          src={log.image_url || log.photoUrl} 
                           alt={log.name} 
                           style={{
                             width: '42px',
@@ -427,7 +430,7 @@ export const DetectionLogs: React.FC<DetectionLogsProps> = ({ logs, onDeleteLog 
                       title={log.name}
                       style={{ fontWeight: 600, color: 'var(--text-main)', verticalAlign: 'middle', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '160px' }}
                     >
-                      {log.name}
+                      <div>{log.name}</div>
                     </td>
 
                     {/* DESIGNATION */}
@@ -620,9 +623,9 @@ export const DetectionLogs: React.FC<DetectionLogsProps> = ({ logs, onDeleteLog 
 
             {/* Large Snapshot */}
             <div style={{ textAlign: 'center', marginBottom: '24px' }}>
-              {selectedLog.photoUrl ? (
+              {(selectedLog.photoUrl || selectedLog.image_url) ? (
                 <img 
-                  src={selectedLog.photoUrl} 
+                  src={selectedLog.image_url || selectedLog.photoUrl} 
                   alt={selectedLog.name} 
                   style={{
                     width: '180px', height: '180px', borderRadius: '16px',
@@ -717,6 +720,15 @@ export const DetectionLogs: React.FC<DetectionLogsProps> = ({ logs, onDeleteLog 
                   {(selectedLog.multiple_persons === 'Yes' || selectedLog.multiple_persons === true || selectedLog.multiple_faces === true) ? 'Yes' : 'No'}
                 </span>
               </div>
+
+              {selectedLog.auth_method && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid rgba(255,255,255,0.05)', paddingBottom: '8px' }}>
+                  <span style={{ color: 'var(--text-muted)' }}>Authentication Method</span>
+                  <span style={{ color: '#ffffff', fontWeight: 600 }}>
+                    {selectedLog.auth_method === 'FACE' ? 'Biometric Face Recognition' : selectedLog.auth_method}
+                  </span>
+                </div>
+              )}
 
             </div>
 

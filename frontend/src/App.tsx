@@ -15,6 +15,8 @@ import {
   X
 } from 'lucide-react';
 import { deleteUserImagesFromSupabase, supabase, isSupabaseConfigured, withRetry } from './services/supabase';
+import { serialService, type ArduinoConnectionState } from './services/serialService';
+import { loadFaceModels } from './services/modelLoader';
 
 
 
@@ -30,8 +32,9 @@ function App() {
   
   // Hardware status
   const [cameraActive, setCameraActive] = useState(false);
+  const [arduinoConnectionState, setArduinoConnectionState] = useState<ArduinoConnectionState>(serialService.getConnectionState());
   const [arduinoConnected, setArduinoConnected] = useState(false);
-  const [arduinoStatusText, setArduinoStatusText] = useState('No Arduino Detected');
+  const [arduinoStatusText, setArduinoStatusText] = useState('No Arduino Connected');
   
   // Emergency Alert States
   const [alertActive, setAlertActive] = useState(false);
@@ -142,6 +145,8 @@ function App() {
 
   useEffect(() => {
     loadData();
+    // Warm up and cache face models in background so Live Monitoring opens instantly with 0ms delay
+    loadFaceModels().catch(err => console.warn('[VisionGuard] Background model preloading notice:', err));
 
     // Poll every 30s (safe for Supabase free tier — avoids rate-limiting)
     const interval = setInterval(() => { loadData(); }, 30000);
@@ -170,51 +175,51 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [alertActive]);
 
-  // Web Serial Auto Connect/Disconnect detection
+  // Web Serial Real Connection & Alert System Subscriptions
   useEffect(() => {
-    if ('serial' in navigator) {
-      const checkPorts = async () => {
-        try {
-          const ports = await (navigator as any).serial.getPorts();
-          if (ports.length > 0) {
-            setArduinoConnected(true);
-            setArduinoStatusText("COM Port Connected");
-          } else {
-            setArduinoConnected(false);
-            setArduinoStatusText("No Arduino Detected");
-          }
-        } catch (e) {
-          console.log("Web Serial init check failed:", e);
-          setArduinoConnected(false);
-          setArduinoStatusText("No Arduino Detected");
-        }
-      };
-      
-      checkPorts();
+    const handleState = (state: ArduinoConnectionState, portInfo?: string) => {
+      setArduinoConnectionState(state);
+      const isConn = state === 'CONNECTED';
+      setArduinoConnected(isConn);
 
-      const handleConnect = () => {
-        setArduinoConnected(true);
-        setArduinoStatusText("COM Port Connected");
-        triggerNotification("Arduino Status: 🟢 Connected");
-      };
+      if (state === 'CONNECTED') {
+        const info = portInfo || serialService.getPortInfo() || 'COM Port';
+        setArduinoStatusText(`${info} · Alert System Ready`);
+      } else if (state === 'PORT_OPEN') {
+        setArduinoStatusText('Port Open — Waiting for Arduino Handshake...');
+      } else if (state === 'CONNECTING') {
+        setArduinoStatusText('Selecting COM Port...');
+      } else if (state === 'ERROR') {
+        setArduinoStatusText('Device Error / Not Recognized');
+      } else {
+        setArduinoStatusText('No Arduino Connected');
+      }
+    };
 
-      const handleDisconnect = () => {
-        setArduinoConnected(false);
-        setArduinoStatusText("No Arduino Detected");
-        triggerNotification("Arduino Status: 🔴 Disconnected");
-      };
+    // Initialize with current real connection state
+    handleState(serialService.getConnectionState());
 
-      (navigator as any).serial.addEventListener('connect', handleConnect);
-      (navigator as any).serial.addEventListener('disconnect', handleDisconnect);
+    // Subscribe to granular state changes
+    const unsubState = serialService.onStateChange((state, portInfo) => {
+      handleState(state, portInfo);
+      if (state === 'CONNECTED') {
+        triggerNotification('Arduino Hardware: 🟢 Alert System Connected (D7 LED / D6 Buzzer)');
+        setTimeout(() => serialService.sendCommand('PING'), 300);
+      } else if (state === 'ERROR') {
+        triggerNotification('Arduino Hardware: 🔴 Handshake Failed / Device Not Recognized');
+      } else if (state === 'DISCONNECTED') {
+        triggerNotification('Arduino Hardware: 🔴 Disconnected');
+      }
+    });
 
-      return () => {
-        (navigator as any).serial.removeEventListener('connect', handleConnect);
-        (navigator as any).serial.removeEventListener('disconnect', handleDisconnect);
-      };
-    } else {
-      setArduinoConnected(false);
-      setArduinoStatusText("No Arduino Detected");
-    }
+    // Try silent reconnect to previously permitted port if available
+    serialService.tryAutoConnect(9600).catch(err => {
+      console.log('[VisionGuard] Serial auto-connect notice:', err);
+    });
+
+    return () => {
+      unsubState();
+    };
   }, []);
 
   // Sync Theme body class
@@ -225,7 +230,7 @@ function App() {
       document.body.classList.remove('light-theme');
     }
   }, [isLightTheme]);
-  // Push new log entry helper
+  // Push new log entry helper (Biometric Face Recognition)
   const addLogEntry = async (
     name: string,
     status: string,
@@ -236,7 +241,9 @@ function App() {
     multiplePersons: boolean = false,
     spoofReason?: string,
     livenessScore?: number,
-    faceCount: number = 1
+    faceCount: number = 1,
+    authMethod: string = 'FACE',
+    rawLogData?: any
   ) => {
     // Generate dates dynamically based on system clock at moment of detection
     const now = new Date();
@@ -267,7 +274,7 @@ function App() {
     }
 
     // Optimistically add to local state immediately so Dashboard updates right away
-    const localLog = {
+    const localLog: Log = {
       id: 'LOCAL-' + Date.now(),
       name,
       status,
@@ -282,8 +289,10 @@ function App() {
       spoof_detected: spoofDetected,
       multiple_faces: multiplePersons,
       spoof_reason: spoofReason || null,
-      liveness_score: livenessScore !== undefined ? Math.round(livenessScore) : null,
-      face_count: faceCount
+      liveness_score: livenessScore !== undefined && livenessScore !== null ? Math.round(livenessScore) : null,
+      face_count: faceCount,
+      auth_method: authMethod,
+      raw_log_data: rawLogData || null
     };
     setLogs(prev => [localLog, ...prev]);
 
@@ -302,8 +311,9 @@ function App() {
       spoof_detected: spoofDetected,
       multiple_faces: multiplePersons,
       spoof_reason: spoofReason || null,
-      liveness_score: livenessScore !== undefined ? Math.round(livenessScore) : null,
-      face_count: faceCount
+      liveness_score: livenessScore !== undefined && livenessScore !== null ? Math.round(livenessScore) : null,
+      face_count: faceCount,
+      auth_method: authMethod
     };
 
     // --- ASYNCHRONOUS NON-BLOCKING BACKGROUND DISPATCH ---
@@ -320,9 +330,17 @@ function App() {
           designation: matchedDesignation || null,
           camera_id: 'CAM-01',
           log_timestamp: now.toISOString(),
+          auth_method: authMethod || 'FACE',
+          raw_log_data: rawLogData || null
         };
 
-        if (photoUrl) safePayload.photoUrl = photoUrl;
+        if (photoUrl) {
+          safePayload.photoUrl = photoUrl;
+          // If photoUrl is a remote URL (Supabase Storage), also store it in image_url column
+          if (photoUrl.startsWith('http')) {
+            safePayload.image_url = photoUrl;
+          }
+        }
 
         Promise.resolve(supabase.from('detection_logs').insert(safePayload).select().single())
           .then(({ data, error }) => {
@@ -434,7 +452,7 @@ function App() {
           lastUpdatedTime:      newUser.lastUpdatedTime,
           last_updated_date:    newUser.last_updated_date,
           last_updated_time:    newUser.last_updated_time,
-          face_images:          newUser.face_images,
+          face_images:          newUser.face_images
         };
         // Strip undefined keys so Supabase doesn't complain
         Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
@@ -582,7 +600,7 @@ function App() {
           last_updated_date:    editedUser.last_updated_date,
           last_updated_time:    editedUser.last_updated_time,
           faceEmbedding:        editedUser.faceEmbedding,
-          face_images:          editedUser.face_images,
+          face_images:          editedUser.face_images
         };
         // Strip undefined keys
         Object.keys(payload).forEach(k => payload[k] === undefined && delete payload[k]);
@@ -880,6 +898,7 @@ function App() {
               unknownCount={unknownCount}
               cameraActive={cameraActive}
               arduinoConnected={arduinoConnected}
+              arduinoConnectionState={arduinoConnectionState}
               arduinoStatusDetails={arduinoStatusText}
               onNavigate={handleSetActiveTab}
               recentLogs={logs}
@@ -914,11 +933,13 @@ function App() {
               cameraActive={cameraActive}
               setCameraActive={setCameraActive}
               arduinoConnected={arduinoConnected}
+              arduinoConnectionState={arduinoConnectionState}
               arduinoStatusText={arduinoStatusText}
               triggerNotification={triggerNotification}
               addLogEntry={addLogEntry}
               onUnknownPersonDetected={handleUnknownPersonDetected}
               reloadUserData={loadData}
+              setAlertActive={setAlertActive}
             />
           )}
 
@@ -927,6 +948,7 @@ function App() {
               users={registeredUsers}
               onDeleteUser={handleDeleteUser}
               onEditUser={handleEditUser}
+              arduinoConnected={arduinoConnected}
             />
           )}
 
@@ -942,6 +964,7 @@ function App() {
               isLightTheme={isLightTheme}
               setIsLightTheme={setIsLightTheme}
               arduinoConnected={arduinoConnected}
+              arduinoConnectionState={arduinoConnectionState}
               setArduinoConnected={setArduinoConnected}
               onSaveSettings={handleUpdateSettings}
             />

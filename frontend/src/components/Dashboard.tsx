@@ -17,14 +17,17 @@ import {
   TrendingUp,
   UserCheck,
   Radio,
-  Wifi
+  Wifi,
+  Volume2
 } from "lucide-react";
+import type { ArduinoConnectionState } from "../services/serialService";
 
 interface DashboardProps {
   usersCount: number;
   unknownCount: number;
   cameraActive: boolean;
   arduinoConnected: boolean;
+  arduinoConnectionState?: ArduinoConnectionState;
   arduinoStatusDetails: string;
   onNavigate: (tab: string) => void;
   recentLogs: any[];
@@ -37,6 +40,7 @@ export const Dashboard: React.FC<DashboardProps> = (props) => {
     unknownCount,
     cameraActive,
     arduinoConnected,
+    arduinoConnectionState,
     arduinoStatusDetails,
     recentLogs,
     onNavigate,
@@ -44,6 +48,15 @@ export const Dashboard: React.FC<DashboardProps> = (props) => {
   } = props;
 
   const [currentTime, setCurrentTime] = useState(new Date());
+
+  // Derive refined Arduino Alert System UI state from granular connection state
+  const connState = arduinoConnectionState || (arduinoConnected ? 'CONNECTED' : 'DISCONNECTED');
+  const isArduinoFullyOnline = connState === 'CONNECTED';
+  const isArduinoPending = connState === 'PORT_OPEN' || connState === 'CONNECTING';
+  const isArduinoError = connState === 'ERROR';
+
+  const arduinoStatusDotClass = isArduinoFullyOnline ? 'dot-green' : isArduinoPending ? 'dot-orange' : 'dot-red';
+  const arduinoHeroText = isArduinoFullyOnline ? 'Connected' : isArduinoPending ? 'Handshaking...' : isArduinoError ? 'Error' : 'Disconnected';
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(new Date()), 1000);
@@ -103,8 +116,8 @@ export const Dashboard: React.FC<DashboardProps> = (props) => {
                 <span>Camera: {cameraActive ? "Online" : "Offline"}</span>
               </div>
               <div className="hero-sys-status">
-                <span className={"sys-status-dot " + (arduinoConnected ? "dot-green" : "dot-orange")} />
-                <span>Arduino: {arduinoConnected ? "Connected" : "Disconnected"}</span>
+                <span className={"sys-status-dot " + arduinoStatusDotClass} />
+                <span>Arduino: {arduinoHeroText}</span>
               </div>
             </div>
           </div>
@@ -178,15 +191,30 @@ export const Dashboard: React.FC<DashboardProps> = (props) => {
         </div>
 
         <div className="glass-panel glass-panel-hover kpi-card" onClick={() => onNavigate("settings")}>
-          <div className="kpi-icon-box" style={{ background: arduinoConnected ? "rgba(0,255,136,0.15)" : "rgba(100,100,100,0.15)", color: arduinoConnected ? "#00ff88" : "#ff3b30" }}>
+          <div className="kpi-icon-box" style={{ 
+            background: isArduinoFullyOnline ? "rgba(0,255,136,0.15)" : isArduinoPending ? "rgba(255,183,0,0.15)" : "rgba(100,100,100,0.15)", 
+            color: isArduinoFullyOnline ? "#00ff88" : isArduinoPending ? "#ffb700" : "#ff3b30" 
+          }}>
             <Cpu size={26} />
           </div>
           <div className="kpi-content">
-            <span className="kpi-label">Arduino Status</span>
-            <div className="kpi-value" style={{ color: arduinoConnected ? "#00ff88" : "#ff3b30", fontFamily: "Orbitron", fontSize: "1.5rem" }}>
-              {arduinoConnected ? "Online" : "Offline"}
+            <span className="kpi-label">Arduino Alert System</span>
+            <div className="kpi-value" style={{ 
+              color: isArduinoFullyOnline ? "#00ff88" : isArduinoPending ? "#ffb700" : "#ff3b30", 
+              fontFamily: "Orbitron", 
+              fontSize: "1.35rem" 
+            }}>
+              {isArduinoFullyOnline ? "Online" : isArduinoPending ? "Pending" : isArduinoError ? "Error" : "Offline"}
             </div>
-            <span className="kpi-sub">{arduinoConnected ? arduinoStatusDetails : "No Arduino detected"}</span>
+            <span className="kpi-sub">
+              {isArduinoFullyOnline
+                ? "D7 LED + D6 Buzzer Armed" 
+                : isArduinoPending
+                ? "Waiting for handshake..."
+                : isArduinoError
+                ? "Device not recognized"
+                : "No Arduino detected"}
+            </span>
           </div>
         </div>
 
@@ -305,6 +333,25 @@ export const Dashboard: React.FC<DashboardProps> = (props) => {
             </div>
           </div>
           <div className="status-card-desc">Entrance camera · USB or IP stream supported</div>
+        </div>
+
+        <div className="glass-panel status-card" style={{ cursor: "pointer" }} onClick={() => onNavigate("settings")}>
+          <div className="status-card-inner">
+            <div className="status-icon-sm" style={{ 
+              background: isArduinoFullyOnline ? "rgba(0,255,136,0.12)" : isArduinoPending ? "rgba(255,183,0,0.12)" : "rgba(100,100,100,0.12)", 
+              color: isArduinoFullyOnline ? "#00ff88" : isArduinoPending ? "#ffb700" : "#8fa0c5" 
+            }}>
+              <Volume2 size={18} />
+            </div>
+            <div>
+              <div className="status-card-label">Hardware Alert System</div>
+              <div className={"status-badge " + (isArduinoFullyOnline ? "status-badge-online" : isArduinoPending ? "status-badge-warning" : "status-badge-offline")}>
+                <span className={"sys-status-dot " + (isArduinoFullyOnline ? "dot-green" : isArduinoPending ? "dot-orange" : "dot-gray")} />
+                {isArduinoFullyOnline ? "Alerts Armed" : isArduinoPending ? "Initializing..." : "Hardware Offline"}
+              </div>
+            </div>
+          </div>
+          <div className="status-card-desc">LED D7 (220Ω) + Buzzer D6 · Automated face detection triggers</div>
         </div>
 
       </div>

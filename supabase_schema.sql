@@ -5,28 +5,29 @@
 
 -- 1. Registered Users Table
 CREATE TABLE IF NOT EXISTS "public"."registered_users" (
-    "id"                  TEXT PRIMARY KEY,
-    "name"                TEXT NOT NULL,
-    "role"                TEXT,
-    "photoUrl"            TEXT,
-    "regDate"             TEXT,
-    "faceEmbedding"       TEXT,
-    "totalCapturedImages" INTEGER DEFAULT 0
+    "id"                   TEXT PRIMARY KEY,
+    "name"                 TEXT NOT NULL,
+    "role"                 TEXT,
+    "photoUrl"             TEXT,
+    "regDate"              TEXT,
+    "faceEmbedding"        TEXT,
+    "totalCapturedImages"  INTEGER DEFAULT 0
 );
 
 -- 2. Detection Logs Table
 CREATE TABLE IF NOT EXISTS "public"."detection_logs" (
-    "id"            TEXT PRIMARY KEY,
-    "name"          TEXT,
-    "status"        TEXT,
-    "date"          TEXT,
-    "time"          TEXT,
-    "confidence"    INTEGER,
-    "photoUrl"      TEXT,
-    "user_id"       TEXT,
-    "designation"   TEXT,
-    "camera_id"     TEXT DEFAULT 'CAM-01',
-    "log_timestamp" TIMESTAMP DEFAULT timezone('Asia/Kolkata', NOW())
+    "id"             TEXT PRIMARY KEY,
+    "name"           TEXT,
+    "status"         TEXT,
+    "date"           TEXT,
+    "time"           TEXT,
+    "confidence"     INTEGER,
+    "photoUrl"       TEXT,
+    "user_id"        TEXT,
+    "designation"    TEXT,
+    "camera_id"      TEXT DEFAULT 'CAM-01',
+    "log_timestamp"  TIMESTAMP DEFAULT timezone('Asia/Kolkata', NOW()),
+    "auth_method"    TEXT DEFAULT 'FACE'
 );
 
 -- Ensure columns exist if table was already created
@@ -34,16 +35,17 @@ ALTER TABLE "public"."detection_logs" ADD COLUMN IF NOT EXISTS "user_id" TEXT;
 ALTER TABLE "public"."detection_logs" ADD COLUMN IF NOT EXISTS "designation" TEXT;
 ALTER TABLE "public"."detection_logs" ADD COLUMN IF NOT EXISTS "camera_id" TEXT DEFAULT 'CAM-01';
 ALTER TABLE "public"."detection_logs" ADD COLUMN IF NOT EXISTS "log_timestamp" TIMESTAMP DEFAULT timezone('Asia/Kolkata', NOW());
+ALTER TABLE "public"."detection_logs" ADD COLUMN IF NOT EXISTS "auth_method" TEXT DEFAULT 'FACE';
 
 -- 3. System Settings Table (single row - id = 'default')
 CREATE TABLE IF NOT EXISTS "public"."system_settings" (
-    "id"                  TEXT PRIMARY KEY DEFAULT 'default',
-    "cameraSource"        TEXT,
-    "comPort"             TEXT,
-    "alarmSound"          BOOLEAN DEFAULT TRUE,
-    "confidenceThreshold" INTEGER DEFAULT 85,
-    "arduinoConnected"    BOOLEAN DEFAULT FALSE,
-    "themeMode"           TEXT DEFAULT 'dark'
+    "id"                    TEXT PRIMARY KEY DEFAULT 'default',
+    "cameraSource"          TEXT,
+    "comPort"               TEXT,
+    "alarmSound"            BOOLEAN DEFAULT TRUE,
+    "confidenceThreshold"   INTEGER DEFAULT 85,
+    "arduinoConnected"      BOOLEAN DEFAULT FALSE,
+    "themeMode"             TEXT DEFAULT 'dark'
 );
 
 -- Seed the default settings row (safe to run multiple times)
@@ -244,6 +246,12 @@ BEGIN
     END IF;
     IF NEW."photoUrl" IS NULL OR NEW."photoUrl" = '' THEN
         NEW."photoUrl" = NEW."snapshotUrl";
+    END IF;
+    IF NEW."image_url" IS NULL OR NEW."image_url" = '' THEN
+        NEW."image_url" = NEW."photoUrl";
+    END IF;
+    IF NEW."image_path" IS NULL OR NEW."image_path" = '' THEN
+        NEW."image_path" = NEW."photoUrl";
     END IF;
     RETURN NEW;
 END;
@@ -566,3 +574,79 @@ CREATE INDEX "idx_detection_logs_timestamp" ON "public"."detection_logs"("log_ti
 -- =====================================================
 ALTER TABLE "public"."detection_logs" DROP COLUMN IF EXISTS "device_detected";
 ALTER TABLE "public"."detection_logs" DROP COLUMN IF EXISTS "device_type";
+
+-- =====================================================
+-- 12. Unauthorized Detection Snapshot Image Storage
+-- =====================================================
+-- image_url: Public Supabase Storage URL of the captured snapshot
+-- image_path: Storage path inside the bucket (for deletion/reference)
+ALTER TABLE "public"."detection_logs" ADD COLUMN IF NOT EXISTS "image_url" TEXT;
+ALTER TABLE "public"."detection_logs" ADD COLUMN IF NOT EXISTS "image_path" TEXT;
+
+-- Index for quick lookup of logs that have images
+CREATE INDEX IF NOT EXISTS "idx_detection_logs_image_url" ON "public"."detection_logs"("image_url") WHERE "image_url" IS NOT NULL;
+
+-- =====================================================
+-- 13. Supabase Storage: face-images bucket policies
+-- =====================================================
+-- Run this ONCE to ensure the face-images bucket exists and is public:
+-- (If bucket doesn't exist yet, create it in Storage → New Bucket → name: face-images → Public)
+-- Then ensure these RLS policies exist on the storage.objects table:
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'storage'
+          AND tablename = 'objects'
+          AND policyname = 'visionguard_storage_anon_select'
+    ) THEN
+        CREATE POLICY "visionguard_storage_anon_select"
+        ON storage.objects FOR SELECT
+        USING (bucket_id = 'face-images');
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'storage'
+          AND tablename = 'objects'
+          AND policyname = 'visionguard_storage_anon_insert'
+    ) THEN
+        CREATE POLICY "visionguard_storage_anon_insert"
+        ON storage.objects FOR INSERT
+        WITH CHECK (bucket_id = 'face-images');
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'storage'
+          AND tablename = 'objects'
+          AND policyname = 'visionguard_storage_anon_update'
+    ) THEN
+        CREATE POLICY "visionguard_storage_anon_update"
+        ON storage.objects FOR UPDATE
+        USING (bucket_id = 'face-images');
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'storage'
+          AND tablename = 'objects'
+          AND policyname = 'visionguard_storage_anon_delete'
+    ) THEN
+        CREATE POLICY "visionguard_storage_anon_delete"
+        ON storage.objects FOR DELETE
+        USING (bucket_id = 'face-images');
+    END IF;
+END $$;
+
+

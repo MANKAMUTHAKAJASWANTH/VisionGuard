@@ -72,4 +72,7 @@ public class DetectionLog {
 
     @com.fasterxml.jackson.annotation.JsonProperty("detected_at")
     private String detectedAt;
+
+    @com.fasterxml.jackson.annotation.JsonProperty("auth_method")
+    private String authMethod;
 }

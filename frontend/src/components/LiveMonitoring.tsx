@@ -9,11 +9,17 @@ import {
   RefreshCw,
   Clock,
   Calendar,
-  CheckCircle
+  CheckCircle,
+  CheckCircle2,
+  XCircle,
+  RotateCcw
 } from 'lucide-react';
 import { apiService } from '../services/api';
 import type { User } from '../services/api';
-import { uploadImageToSupabase, isSupabaseConfigured, supabase } from '../services/supabase';
+import { uploadImageToSupabase, uploadDetectionSnapshotToSupabase, isSupabaseConfigured, supabase } from '../services/supabase';
+import { serialService, type ArduinoConnectionState } from '../services/serialService';
+import { areModelsLoaded, loadFaceModels } from '../services/modelLoader';
+
 
 const faceapi = (window as any).faceapi;
 
@@ -22,6 +28,7 @@ interface LiveMonitoringProps {
   cameraActive: boolean;
   setCameraActive: (val: boolean) => void;
   arduinoConnected: boolean;
+  arduinoConnectionState?: ArduinoConnectionState;
   arduinoStatusText: string;
   triggerNotification: (message: string) => void;
   addLogEntry: (
@@ -34,10 +41,11 @@ interface LiveMonitoringProps {
     multiplePersons?: boolean,
     spoofReason?: string,
     livenessScore?: number,
-    faceCount?: number
+    authMethod?: string,
+    identityMatch?: boolean,
+    metadata?: Record<string, any>
   ) => void;
-  onUnknownPersonDetected: (snapshot: string, confidence: number) => void;
-  reloadUserData?: () => Promise<void>;
+  setAlertActive?: (active: boolean) => void;
 }
 
 export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
@@ -45,11 +53,11 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
   cameraActive,
   setCameraActive,
   arduinoConnected,
+  arduinoConnectionState,
   arduinoStatusText,
   triggerNotification,
   addLogEntry,
-  onUnknownPersonDetected: _onUnknownPersonDetected,
-  reloadUserData
+  setAlertActive
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -63,7 +71,7 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
   const [alarmActive, setAlarmActive] = useState(false);
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [fps, setFps] = useState(60);
-  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [modelsLoaded, setModelsLoaded] = useState(() => areModelsLoaded());
   const [modelsLoadingError, setModelsLoadingError] = useState(false);
   const [time, setTime] = useState(new Date());
 
@@ -77,6 +85,46 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
   // Smart Access states
   const [multipleAuthorizedInFrame, setMultipleAuthorizedInFrame] = useState(false);
   const [multiplePersonsWarning, setMultiplePersonsWarning] = useState(false);
+
+  // Fast lightweight snapshot generator for logs & alerts
+  const captureFastSnapshot = (videoEl: HTMLVideoElement): string => {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 360;
+      canvas.height = 202;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(videoEl, 0, 0, 360, 202);
+        return canvas.toDataURL('image/jpeg', 0.45);
+      }
+    } catch (e) {
+      console.warn("[VisionGuard AI] Snapshot capture failed:", e);
+    }
+    return '';
+  };
+
+  // Alarm sound generator
+  const playAlarmBeep = () => {
+    try {
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+
+      oscillator.type = 'sawtooth';
+      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); 
+      gainNode.gain.setValueAtTime(0.08, audioCtx.currentTime);
+
+      oscillator.start();
+      oscillator.frequency.linearRampToValueAtTime(440, audioCtx.currentTime + 0.3);
+      oscillator.frequency.linearRampToValueAtTime(880, audioCtx.currentTime + 0.6);
+      oscillator.stop(audioCtx.currentTime + 0.65);
+    } catch (e) {
+      console.log("AudioContext blocked:", e);
+    }
+  };
 
   // Load configurable confidence threshold and security mode from settings on mount
   useEffect(() => {
@@ -104,6 +152,7 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
     status: 'Authorized' | 'Unknown' | 'Unregistered Visitor' | 'Security Alert' | 'Unauthorized' | 'Verifying';
     confidence: number;
     timestamp: string;
+    faceDetected?: boolean;
   } | null>(null);
 
   // Popup Modal Registration States
@@ -216,55 +265,26 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  // Load face-api.js Models on mount — local public/models/ first, CDN fallbacks second
+  // Fast parallel neural model loading using global cache singleton
   useEffect(() => {
-    const loadModels = async () => {
-      if (!faceapi) {
-        console.error('[VisionGuard AI] face-api.js global not found. Ensure the script tag in index.html has loaded.');
-        setModelsLoadingError(true);
-        return;
-      }
+    if (areModelsLoaded()) {
+      setModelsLoaded(true);
+      return;
+    }
 
-      // Model sources in priority order:
-      // 1. Local /models/ served from Vercel CDN (permanent, no external dependency)
-      // 2. jsDelivr CDN fallback
-      // 3. unpkg CDN fallback
-      const MODEL_SOURCES = [
-        '/models',
-        'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights',
-        'https://unpkg.com/face-api.js@0.22.2/weights',
-      ];
-
-      const tryLoadFromSource = async (baseUrl: string): Promise<boolean> => {
-        try {
-          await faceapi.nets.tinyFaceDetector.loadFromUri(baseUrl);
-          await faceapi.nets.faceLandmark68Net.loadFromUri(baseUrl);
-          await faceapi.nets.faceRecognitionNet.loadFromUri(baseUrl);
-          return true;
-        } catch {
-          return false;
-        }
-      };
-
-      for (const source of MODEL_SOURCES) {
-        console.log(`[VisionGuard AI] Loading models from: ${source}`);
-        const success = await tryLoadFromSource(source);
+    loadFaceModels()
+      .then(success => {
         if (success) {
           setModelsLoaded(true);
-          console.log(`[VisionGuard AI] ✅ All neural models loaded from: ${source}`);
-          return;
+        } else {
+          setModelsLoadingError(true);
         }
-        console.warn(`[VisionGuard AI] Failed to load from ${source}, trying next source...`);
-      }
-
-      console.error('[VisionGuard AI] ❌ All model sources failed. Face recognition is unavailable.');
-      setModelsLoadingError(true);
-    };
-
-    loadModels();
+      })
+      .catch(err => {
+        console.error('[VisionGuard AI] Error initializing models:', err);
+        setModelsLoadingError(true);
+      });
   }, []);
-
-
 
   // Web Camera Stream setup - automatically starts immediately on mount
   const stopCameraStream = () => {
@@ -294,11 +314,16 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
       let mediaStream: MediaStream;
       try {
         mediaStream = await navigator.mediaDevices.getUserMedia({
-          video: { width: 640, height: 360, aspectRatio: 1.7777777778 }
+          video: {
+            width: { ideal: 640, min: 320 },
+            height: { ideal: 360, min: 240 },
+            facingMode: 'user'
+          },
+          audio: false
         });
       } catch (constraintErr) {
-        console.warn("[LiveMonitoring] High resolution constraints unavailable, falling back to standard camera stream...", constraintErr);
-        mediaStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        console.warn("[LiveMonitoring] Ideal camera constraints unavailable, using default stream:", constraintErr);
+        mediaStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
       }
 
       activeStreamRef.current = mediaStream;
@@ -312,7 +337,7 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
       setCameraActive(true);
       setMonitoring(true);
       setCameraError(null);
-      console.log("[LiveMonitoring] Camera connected and live monitoring active.");
+      console.log("[LiveMonitoring] Camera connected and live monitoring active immediately.");
     } catch (err: any) {
       console.error("[LiveMonitoring] Camera access error:", err);
       stopCameraStream();
@@ -335,8 +360,11 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
     }
   };
 
-  // Ensure clean stream teardown on unmount
+  // Launch camera & detection immediately on mount, and cleanly teardown on unmount
   useEffect(() => {
+    // Automatically open camera immediately when user opens Live Monitoring
+    initCamera();
+
     return () => {
       stopCameraStream();
       setCameraActive(false);
@@ -346,29 +374,24 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
 
   // Web Serial functions for Arduino alarm triggers
   const sendSerialSignal = async (signal: string) => {
-    // Debounce: only write if signal changed or 5 seconds have elapsed since last write
     const now = Date.now();
-    if (lastSerialSignalRef.current.signal === signal && now - lastSerialSignalRef.current.time < 5000) {
+    // 500ms threshold for same-signal repeat, immediate for new signals
+    if (lastSerialSignalRef.current.signal === signal && now - lastSerialSignalRef.current.time < 500) {
       return;
     }
     lastSerialSignalRef.current = { signal, time: now };
     try {
-      if ('serial' in navigator) {
-        const ports = await (navigator as any).serial.getPorts();
-        if (ports.length > 0) {
-          const port = ports[0];
-          if (!port.readable) {
-            await port.open({ baudRate: 9600 });
-          }
-          const encoder = new TextEncoder();
-          const writer = port.writable.getWriter();
-          await writer.write(encoder.encode(signal));
-          writer.releaseLock();
-          console.log(`[VisionGuard Serial] Sent signal to Arduino: ${signal.trim()}`);
-        }
+      if (signal === "1\n" || signal === "1" || signal === "UNAUTHORIZED") {
+        await serialService.sendCommand('UNAUTHORIZED');
+      } else if (signal === "AUTHORIZED") {
+        await serialService.sendCommand('AUTHORIZED');
+      } else if (signal === "OFF" || signal === "ALERT_OFF" || signal === "0\n" || signal === "0") {
+        await serialService.sendCommand('OFF');
+      } else {
+        await serialService.sendCommand(signal);
       }
     } catch (err) {
-      console.warn('[VisionGuard Serial] Failed to send signal to Arduino:', err);
+      console.warn('[VisionGuard Serial] Failed to send command to Arduino:', err);
     }
   };
 
@@ -385,11 +408,10 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
 
     const drawLoop = () => {
       if (!active) return;
-
       const video = videoRef.current;
       const canvas = canvasRef.current;
 
-      if (monitoring && cameraActive && !cameraLoading && video && canvas && modelsLoaded && biometricsLoaded && !isEnrolling.current) {
+      if (monitoring && cameraActive && !cameraLoading && video && canvas && modelsLoaded && !isEnrolling.current) {
         // Sync canvas size
         if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
           const displaySize = { width: video.videoWidth, height: video.videoHeight };
@@ -466,20 +488,20 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
 
               // Text plate
               let labelLine1 = isMatch ? `🟢 AUTHORIZED` : `🔴 UNAUTHORIZED`;
-              let labelLine2 = isMatch ? `Name: ${displayName}` : 'Access Denied';
-              let labelLine3 = isMatch ? `Designation: ${designation}` : `Confidence: ${displayConf}%`;
-              let labelLine4 = isMatch ? `Confidence: ${displayConf}%` : '';
+              let labelLine2 = isMatch ? `Name: ${displayName}` : 'Name: Unknown';
+              let labelLine3 = isMatch ? `Status: AUTHORIZED` : `Status: UNAUTHORIZED`;
+              let labelLine4 = `Confidence: ${displayConf}%`;
 
               if (isSpoof) {
                 labelLine1 = `🔴 UNAUTHORIZED`;
                 labelLine2 = `Live Face Verification Failed.`;
-                labelLine3 = `Liveness Score: ${t.stableLivenessScore}%`;
-                labelLine4 = ``;
+                labelLine3 = `Status: UNAUTHORIZED`;
+                labelLine4 = `Liveness Score: ${t.stableLivenessScore}%`;
               } else if (isVerifying) {
                 labelLine1 = `🟡 VERIFYING...`;
-                labelLine2 = `Hold still...`;
-                labelLine3 = ``;
-                labelLine4 = ``;
+                labelLine2 = `Name: Identifying...`;
+                labelLine3 = `Status: VERIFYING`;
+                labelLine4 = `Confidence: --`;
               }
 
               const labelBg = isSpoof 
@@ -489,8 +511,8 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
                 : isMatch 
                 ? 'rgba(0, 180, 90, 0.95)' 
                 : 'rgba(200, 30, 30, 0.95)';
-              const labelH = (isMatch || isSpoof) ? 80 : (isVerifying ? 50 : 64); 
-              const labelW = Math.max(box.width, 185);
+              const labelH = 82; 
+              const labelW = Math.max(box.width, 195);
               const labelY = box.y > labelH + 4 ? box.y - labelH - 4 : box.y + box.height + 4;
 
               ctx.fillStyle = labelBg;
@@ -514,16 +536,18 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
 
               // Line 2: Name / Access Denied
               ctx.font = 'bold 11px Inter, sans-serif';
-              ctx.fillStyle = 'rgba(255,255,255,0.9)';
-              ctx.fillText(labelLine2, box.x + 10, labelY + 34);
+              ctx.fillStyle = 'rgba(255,255,255,0.95)';
+              ctx.fillText(labelLine2, box.x + 10, labelY + 35);
 
-              // Line 3: Designation / Confidence
-              ctx.fillText(labelLine3, box.x + 10, labelY + 50);
+              // Line 3: Status
+              ctx.font = '11px Inter, sans-serif';
+              ctx.fillStyle = 'rgba(255,255,255,0.85)';
+              ctx.fillText(labelLine3, box.x + 10, labelY + 52);
 
               // Line 4: Confidence
-              if (isMatch || isSpoof) {
-                ctx.fillText(labelLine4, box.x + 10, labelY + 66);
-              }
+              ctx.font = '11px Inter, sans-serif';
+              ctx.fillStyle = 'rgba(255,255,255,0.85)';
+              ctx.fillText(labelLine4, box.x + 10, labelY + 69);
             });
           }
 
@@ -656,11 +680,8 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
       let unregisteredCount = 0;
       let maxConfidenceInFrame = 0;
 
+      // Embeddings available for matching (recognition continues even with 0 profiles as Unknown)
       const totalEmbeddings = parsedUsersRef.current.reduce((acc, u) => acc + (u.parsedEmbeddings?.length || 0), 0);
-      if (totalEmbeddings === 0 && parsedUsersRef.current.length > 0) {
-        console.warn('[VisionGuard AI] No embeddings loaded yet. Skipping recognition until biometrics are ready.');
-        return;
-      }
 
       // Rule 4: If multiple faces are detected: Immediately stop recognition.
       const hasMultipleFaces = detections.length > 1;
@@ -747,13 +768,13 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
           tracker = {
             box,
             history: [],
-            stableName: 'VERIFYING...',
+            stableName: 'Identifying...',
             stableIsMatch: false,
             stableIsSpoof: false,
             stableConf: 0,
             updated: true,
             lockUntil: 0,
-            isVerifying: true,
+            isVerifying: false,
             consecutiveSpoofFrames: 0
           };
           trackedFacesRef.current.push(tracker);
@@ -879,70 +900,23 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
           rawConf = Math.round(Math.max(5, Math.min(45, (1 - unknownDist) * 55)));
         }
 
-        const rawName = rawIsMatch && matchedUser ? matchedUser.name : 'Unknown Person';
+        const rawName = rawIsMatch && matchedUser ? matchedUser.name : 'Unknown';
         const rawUserId = rawIsMatch && matchedUser ? matchedUser.id : undefined;
 
         // Push current frame classification to temporal history buffer
         tracker.history.push({ name: rawName, isMatch: rawIsMatch, userId: rawUserId, conf: rawConf });
-        if (tracker.history.length > 8) {
+        if (tracker.history.length > 6) {
           tracker.history.shift();
         }
 
-        // Compute votes over the valid frames in the temporal history buffer
-        const totalVotes = tracker.history.length;
-        if (totalVotes < 3) {
-          tracker.stableName = 'VERIFYING...';
-          tracker.stableIsMatch = false;
-          tracker.isVerifying = true;
-        } else {
-          const nameVotes: { [key: string]: number } = {};
-          let matchVotes = 0;
-          let noMatchVotes = 0;
+        // Instant classification on frame 1 without delay
+        tracker.stableName = rawName;
+        tracker.stableIsMatch = rawIsMatch;
+        tracker.stableUserId = rawUserId;
+        tracker.stableConf = rawConf;
+        tracker.isVerifying = false;
 
-          tracker.history.forEach((h: any) => {
-            nameVotes[h.name] = (nameVotes[h.name] || 0) + 1;
-            if (h.isMatch) matchVotes++;
-            else noMatchVotes++;
-          });
-
-          let votedName = 'Unknown Person';
-          let maxVotes = 0;
-          Object.keys(nameVotes).forEach(nameKey => {
-            if (nameVotes[nameKey] > maxVotes) {
-              maxVotes = nameVotes[nameKey];
-              votedName = nameKey;
-            }
-          });
-
-          const matchRatio = matchVotes / totalVotes;
-          const noMatchRatio = noMatchVotes / totalVotes;
-
-          if (votedName !== 'Unknown Person' && matchRatio >= 0.70) {
-            tracker.stableName = votedName;
-            tracker.stableIsMatch = true;
-            tracker.isVerifying = false;
-            const histMatch = tracker.history.find((h: any) => h.name === votedName && h.userId);
-            tracker.stableUserId = histMatch ? histMatch.userId : tracker.stableUserId;
-          } else if (votedName === 'Unknown Person' && noMatchRatio >= 0.70) {
-            tracker.stableName = 'Unknown Person';
-            tracker.stableIsMatch = false;
-            tracker.isVerifying = false;
-            tracker.stableUserId = undefined;
-          } else {
-            // Disagreement or transitional state between frames
-            tracker.stableName = 'VERIFYING...';
-            tracker.stableIsMatch = false;
-            tracker.isVerifying = true;
-          }
-        }
-
-        // Smooth confidence using an Exponential Moving Average (EMA)
-        const prevConf = tracker.stableConf || rawConf;
-        tracker.stableConf = Math.round(prevConf * 0.75 + rawConf * 0.25);
-
-        if (tracker.isVerifying) {
-          // Do not increment authorizedCount or unregisteredCount while verifying to prevent false alarms
-        } else if (tracker.stableIsMatch) {
+        if (tracker.stableIsMatch) {
           authorizedCount++;
           if (tracker.stableConf > maxConfidenceInFrame) maxConfidenceInFrame = tracker.stableConf;
         } else {
@@ -952,10 +926,11 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
 
         const nowStr = new Date().toLocaleTimeString('en-IN', { hour12: false });
         setLastRecognition({
-          name: tracker.isVerifying ? 'Verifying identity...' : tracker.stableIsMatch ? tracker.stableName : 'Unauthorized Person',
-          status: tracker.isVerifying ? 'Verifying' : tracker.stableIsMatch ? 'Authorized' : 'Unknown',
+          name: tracker.stableIsMatch ? tracker.stableName : 'Unknown',
+          status: tracker.stableIsMatch ? 'Authorized' : 'Unknown',
           confidence: tracker.stableConf,
-          timestamp: nowStr
+          timestamp: nowStr,
+          faceDetected: true
         });
       });
 
@@ -968,7 +943,7 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
       if (detections.length > 0) {
         if (unregisteredCount > 0) {
           setAlarmActive(true);
-          sendSerialSignal("1\n");
+          sendSerialSignal("UNAUTHORIZED");
 
           const nowSec = Math.floor(Date.now() / 1000);
           if (nowSec - lastLogTimeSec > 12) {
@@ -978,10 +953,23 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
             if (base64Snapshot) {
               setPendingPhoto(base64Snapshot);
 
+              // Upload snapshot to Supabase Storage and get public URL
+              // Falls back to base64 inline if upload fails
+              const logId = 'UNAUTH-' + Date.now();
+              let snapshotUrl: string = base64Snapshot;
+              if (isSupabaseConfigured) {
+                try {
+                  const uploadedUrl = await uploadDetectionSnapshotToSupabase(base64Snapshot, logId);
+                  if (uploadedUrl) snapshotUrl = uploadedUrl;
+                } catch (_) {
+                  // Keep base64 fallback silently
+                }
+              }
+
               trackedFacesRef.current.forEach((t) => {
                 if (!t.stableIsMatch) {
                   if (t.stableIsSpoof) return;
-                  addLogEntry('Unauthorized Person', 'Unauthorized', t.stableConf, base64Snapshot);
+                  addLogEntry('Unauthorized Person', 'Unauthorized', t.stableConf, snapshotUrl);
                 }
               });
 
@@ -991,8 +979,9 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
           }
         } else {
           setAlarmActive(false);
-          sendSerialSignal("0\n");
+          sendSerialSignal("AUTHORIZED");
 
+          // Normal passive face recognition logging
           trackedFacesRef.current.forEach(t => {
             if (t.stableIsMatch && t.stableUserId) {
               const nowSec = Math.floor(Date.now() / 1000);
@@ -1015,7 +1004,8 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
         // No faces in frame
         setAlarmActive(false);
         setMultipleAuthorizedInFrame(false);
-        sendSerialSignal("0\n");
+        sendSerialSignal("OFF");
+        setLastRecognition(prev => prev && prev.faceDetected ? { ...prev, faceDetected: false } : prev);
       }
     };
 
@@ -1027,30 +1017,6 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
   // Note: parsedUsersRef is NOT in deps — the loop reads from the ref directly,
   // so user data updates never restart the animation loop (eliminates stutter).
   }, [monitoring, cameraActive, modelsLoaded, showRegisterPopup, soundEnabled]);
-
-
-  // Alarm sound generator
-  const playAlarmBeep = () => {
-    try {
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const oscillator = audioCtx.createOscillator();
-      const gainNode = audioCtx.createGain();
-
-      oscillator.connect(gainNode);
-      gainNode.connect(audioCtx.destination);
-
-      oscillator.type = 'sawtooth';
-      oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); 
-      gainNode.gain.setValueAtTime(0.08, audioCtx.currentTime);
-
-      oscillator.start();
-      oscillator.frequency.linearRampToValueAtTime(440, audioCtx.currentTime + 0.3);
-      oscillator.frequency.linearRampToValueAtTime(880, audioCtx.currentTime + 0.6);
-      oscillator.stop(audioCtx.currentTime + 0.65);
-    } catch (e) {
-      console.log("AudioContext blocked:", e);
-    }
-  };
 
   const handleStart = async () => {
     initCamera();
@@ -1363,6 +1329,69 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
           </div>
         </div>
       )}
+
+      {/* Real-time Hardware & Subsystem Readiness Bar */}
+      {(() => {
+        const curArduinoState = arduinoConnectionState || (arduinoConnected ? 'CONNECTED' : 'DISCONNECTED');
+        const isArduinoOnline = curArduinoState === 'CONNECTED';
+        const isArduinoPending = curArduinoState === 'PORT_OPEN' || curArduinoState === 'HANDSHAKE_PENDING' || curArduinoState === 'CONNECTING';
+
+        return (
+          <div className="glass-panel" style={{
+            padding: '12px 20px',
+            display: 'flex',
+            flexWrap: 'wrap',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: '14px',
+            fontSize: '0.78rem',
+            background: 'rgba(5, 5, 21, 0.75)',
+            border: '1px solid var(--border-glass)'
+          }}>
+            {/* Camera Readiness */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className={`sys-status-dot ${cameraActive ? 'dot-green' : cameraLoading ? 'dot-orange' : 'dot-red'}`} />
+              <span style={{ color: 'var(--text-muted)' }}>CCTV Feed:</span>
+              <span style={{ fontFamily: 'Orbitron', fontWeight: 600, color: cameraActive ? 'var(--color-emerald)' : cameraLoading ? '#ffb700' : 'var(--text-muted)' }}>
+                {cameraActive ? 'ONLINE' : cameraLoading ? 'STARTING...' : 'OFFLINE'}
+              </span>
+            </div>
+
+            {/* Neural Models Readiness */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className={`sys-status-dot ${modelsLoaded ? 'dot-green' : modelsLoadingError ? 'dot-red' : 'dot-orange'}`} />
+              <span style={{ color: 'var(--text-muted)' }}>AI Face Engine:</span>
+              <span style={{ fontFamily: 'Orbitron', fontWeight: 600, color: modelsLoaded ? 'var(--color-emerald)' : modelsLoadingError ? 'var(--color-red)' : '#ffb700' }}>
+                {modelsLoaded ? 'ACTIVE' : modelsLoadingError ? 'ERROR' : 'LOADING...'}
+              </span>
+            </div>
+
+            {/* Biometrics Synced */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className={`sys-status-dot ${registeredUsers.length > 0 ? 'dot-green' : 'dot-orange'}`} />
+              <span style={{ color: 'var(--text-muted)' }}>Personnel DB:</span>
+              <span style={{ fontFamily: 'Orbitron', fontWeight: 600, color: registeredUsers.length > 0 ? 'var(--color-cyan)' : '#ffb700' }}>
+                {registeredUsers.length} PROFILES
+              </span>
+            </div>
+
+            {/* Arduino Alert System Readiness */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span className={`sys-status-dot ${isArduinoOnline ? 'dot-green' : isArduinoPending ? 'dot-orange' : 'dot-red'}`} />
+              <span style={{ color: 'var(--text-muted)' }}>Alert System:</span>
+              <span style={{ fontFamily: 'Orbitron', fontWeight: 600, color: isArduinoOnline ? 'var(--color-emerald)' : isArduinoPending ? '#ffb700' : 'var(--text-muted)' }}>
+                {isArduinoOnline 
+                  ? 'ARDUINO CONNECTED'
+                  : isArduinoPending
+                  ? 'HANDSHAKE PENDING...'
+                  : curArduinoState === 'ERROR'
+                  ? 'DEVICE ERROR'
+                  : 'OFFLINE (ALERTS DISABLED)'}
+              </span>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Main Two-Column Layout — always visible */}
       <div className="two-column-layout">
@@ -1725,7 +1754,7 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
 
           {/* Right Column: Active Telemetry Info */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-            
+
             {/* Status Info Card */}
             <div className="glass-panel" style={{ padding: '20px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
@@ -1844,47 +1873,88 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
                 {alarmActive ? '🚨' : lastRecognition?.status === 'Verifying' ? '⏳' : lastRecognition?.status === 'Authorized' ? '✅' : lastRecognition?.status === 'Unknown' ? '🔴' : '🛡️'}
               </div>
 
-              {/* Status Label */}
-              <div>
-                <p style={{
-                  fontFamily: 'Orbitron',
-                  fontSize: '1rem',
-                  fontWeight: 800,
-                  letterSpacing: '1px',
-                  margin: '0 0 6px 0',
-                  color: alarmActive
-                    ? 'var(--color-red)'
-                    : lastRecognition?.status === 'Verifying'
-                    ? '#f59e0b'
+              {/* Status Label & Identification Telemetry */}
+              <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <div style={{
+                  padding: '10px 14px',
+                  borderRadius: '10px',
+                  background: alarmActive || lastRecognition?.status === 'Unknown'
+                    ? 'rgba(255, 59, 48, 0.12)'
                     : lastRecognition?.status === 'Authorized'
-                    ? 'var(--color-emerald)'
-                    : lastRecognition?.status === 'Unknown'
-                    ? 'var(--color-red)'
-                    : 'var(--text-muted)'
+                    ? 'rgba(0, 255, 136, 0.12)'
+                    : 'rgba(255, 255, 255, 0.03)',
+                  border: alarmActive || lastRecognition?.status === 'Unknown'
+                    ? '1.5px solid var(--color-red)'
+                    : lastRecognition?.status === 'Authorized'
+                    ? '1.5px solid var(--color-emerald)'
+                    : '1px solid var(--border-glass)',
+                  textAlign: 'center'
                 }}>
-                  {alarmActive
-                    ? 'BREACH DETECTED'
-                    : lastRecognition?.status === 'Verifying'
-                    ? 'VERIFYING...'
-                    : lastRecognition?.status === 'Authorized'
-                    ? 'AUTHORIZED'
-                    : lastRecognition?.status === 'Unknown'
-                    ? 'UNKNOWN PERSON'
-                    : monitoring ? 'SCANNING...' : 'STANDBY'}
-                </p>
-                <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', margin: 0, lineHeight: 1.5 }}>
-                  {lastRecognition
-                    ? `${lastRecognition.name}`
-                    : monitoring
-                    ? 'Face recognition active. Point camera at a face.'
-                    : 'Click Start Monitoring to begin scanning.'}
-                </p>
-                {lastRecognition && (
-                  <p style={{ fontSize: '0.72rem', color: 'var(--text-muted)', margin: '4px 0 0 0' }}>
-                    Confidence: <span style={{ color: '#ffffff', fontWeight: 700 }}>{lastRecognition.confidence}%</span>
-                    &nbsp;|&nbsp;{lastRecognition.timestamp}
-                  </p>
-                )}
+                  <span style={{ fontSize: '0.7rem', color: 'var(--text-muted)', fontWeight: 700, letterSpacing: '0.5px' }}>ACCESS VERIFICATION:</span>
+                  <div style={{
+                    fontFamily: 'Orbitron',
+                    fontSize: '1.05rem',
+                    fontWeight: 900,
+                    letterSpacing: '1px',
+                    marginTop: '2px',
+                    color: alarmActive || lastRecognition?.status === 'Unknown'
+                      ? 'var(--color-red)'
+                      : lastRecognition?.status === 'Authorized'
+                      ? 'var(--color-emerald)'
+                      : 'var(--text-muted)'
+                  }}>
+                    {lastRecognition?.status === 'Authorized' ? 'AUTHORIZED' :
+                     lastRecognition?.status === 'Unknown' || alarmActive ? 'UNAUTHORIZED' :
+                     monitoring ? 'SCANNING...' : 'STANDBY'}
+                  </div>
+                </div>
+
+                <div style={{
+                  background: 'rgba(5, 5, 21, 0.5)',
+                  padding: '12px 14px',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                  fontSize: '0.82rem',
+                  border: '1px solid var(--border-glass)'
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Face Detected:</span>
+                    <span style={{ fontWeight: 700, color: lastRecognition?.faceDetected ? 'var(--color-emerald)' : 'var(--text-muted)' }}>
+                      {lastRecognition?.faceDetected ? 'YES' : (monitoring ? 'Scanning...' : 'No')}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Name:</span>
+                    <span style={{ fontWeight: 700, color: '#ffffff' }}>
+                      {lastRecognition?.faceDetected ? lastRecognition.name : (monitoring ? 'Searching...' : '--')}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Status:</span>
+                    <span style={{
+                      fontWeight: 800,
+                      fontFamily: 'Orbitron',
+                      fontSize: '0.78rem',
+                      color: lastRecognition?.status === 'Authorized'
+                        ? 'var(--color-emerald)'
+                        : lastRecognition?.status === 'Unknown'
+                        ? 'var(--color-red)'
+                        : 'var(--text-muted)'
+                    }}>
+                      {lastRecognition?.faceDetected
+                        ? (lastRecognition.status === 'Authorized' ? 'AUTHORIZED' : 'UNAUTHORIZED')
+                        : '--'}
+                    </span>
+                  </div>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Confidence:</span>
+                    <span style={{ fontWeight: 700, color: lastRecognition?.faceDetected ? 'var(--color-cyan)' : 'var(--text-muted)' }}>
+                      {lastRecognition?.faceDetected ? `${lastRecognition.confidence}%` : '--'}
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
 

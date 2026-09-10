@@ -85,6 +85,7 @@ export interface Log {
   detectionDate?: string;
   detectionTime?: string;
   detected_at?: string;
+  auth_method?: string;
 }
 
 export interface SystemSettings {

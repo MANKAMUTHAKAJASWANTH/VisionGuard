@@ -5,7 +5,9 @@ import {
   CheckCircle2, 
   AlertTriangle,
   RefreshCw,
-  Info
+  ShieldCheck,
+  Compass,
+  Eye
 } from 'lucide-react';
 import type { User } from '../services/api';
 import { uploadImageToSupabase, isSupabaseConfigured, supabase } from '../services/supabase';
@@ -25,6 +27,59 @@ interface RegisterUserProps {
   adminId: string;
 }
 
+// ── 5 DISTINCT REQUIRED FACE ANGLES ─────────────────────────────────────────
+export interface AngleStageConfig {
+  key: 'FRONT' | 'LEFT' | 'RIGHT' | 'UP' | 'DOWN';
+  name: string;
+  shortLabel: string;
+  instruction: string;
+  tip: string;
+  targetCount: number;
+}
+
+export const ANGLE_STAGES: AngleStageConfig[] = [
+  {
+    key: 'FRONT',
+    name: 'Straight / Front',
+    shortLabel: '1. Front View',
+    instruction: 'Look straight at the camera with a natural expression',
+    tip: 'Center your face in the frame, eyes forward',
+    targetCount: 2
+  },
+  {
+    key: 'LEFT',
+    name: 'Slightly Left',
+    shortLabel: '2. Left Angle',
+    instruction: 'Turn your head slightly to the LEFT (~15° to 25°)',
+    tip: 'Keep eyes toward camera while turning head left',
+    targetCount: 2
+  },
+  {
+    key: 'RIGHT',
+    name: 'Slightly Right',
+    shortLabel: '3. Right Angle',
+    instruction: 'Turn your head slightly to the RIGHT (~15° to 25°)',
+    tip: 'Keep eyes toward camera while turning head right',
+    targetCount: 2
+  },
+  {
+    key: 'UP',
+    name: 'Looking Up',
+    shortLabel: '4. Tilt Up',
+    instruction: 'Tilt your head slightly UPWARD (~10° to 20°)',
+    tip: 'Gently raise your chin upward while looking toward camera',
+    targetCount: 2
+  },
+  {
+    key: 'DOWN',
+    name: 'Looking Down',
+    shortLabel: '5. Tilt Down',
+    instruction: 'Tilt your head slightly DOWNWARD (~10° to 20°)',
+    tip: 'Gently lower your chin downward toward chest',
+    targetCount: 2
+  }
+];
+
 export const RegisterUser: React.FC<RegisterUserProps> = ({
   onRegister,
   onCancel,
@@ -39,11 +94,12 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
 }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  // ── CRITICAL: Store interval ID in a ref so cancelScan() can clear it from anywhere ──
   const captureIntervalRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Ref mirror of isScanning — avoids stale closure reads inside recursive setTimeout
   const isScanningRef = useRef(false);
 
+
+
+  // Form Fields
   const [fullName, setFullName] = useState('');
   const [userId, setUserId] = useState('');
   const [gender, setGender] = useState('Male');
@@ -63,6 +119,7 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
     age?: string;
   }>({});
 
+  // Face Biometrics States
   const [capturedPhoto, setCapturedPhoto] = useState<string | null>(null);
   const [scanProgress, setScanProgress] = useState(0);
   const [isScanning, setIsScanning] = useState(false);
@@ -71,6 +128,39 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
   const [successMsg, setSuccessMsg] = useState('');
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // ── 5-Angle Face Capture Tracking ──────────────────────────────────────────
+  const [currentAngleStageIndex, setCurrentAngleStageIndex] = useState<number>(0);
+  const [anglePreviews, setAnglePreviews] = useState<{ [key: string]: string }>({});
+  const [angleFrameCounts, setAngleFrameCounts] = useState<{ [key: string]: number }>({
+    FRONT: 0,
+    LEFT: 0,
+    RIGHT: 0,
+    UP: 0,
+    DOWN: 0
+  });
+
+  // Enrollment arrays
+  const [capturedCount, setCapturedCount] = useState(0);
+  const [capturedPreviews, setCapturedPreviews] = useState<string[]>([]);
+  const [capturedDescriptors, setCapturedDescriptors] = useState<number[][]>([]);
+  const [capturedAngleTags, setCapturedAngleTags] = useState<string[]>([]);
+  const [avgDescriptor, setAvgDescriptor] = useState<number[] | null>(null);
+
+  const isProcessingFrameRef = useRef(false);
+  const consecutiveSpoofFramesRef = useRef(0);
+  const SPOOF_FRAME_THRESHOLD = 12;
+  const stabilizationFramesRef = useRef(0);
+  const STABILIZATION_REQUIRED_FRAMES = 3;
+  const currentStageHoldFramesRef = useRef(0);
+
+  // Auto-generate standard ID
+  useEffect(() => {
+    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    setUserId(`VG-${randomNum}`);
+  }, []);
+
+
 
   // Dynamic Validation Effect
   useEffect(() => {
@@ -91,7 +181,7 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
     }
     
     if (!department.trim()) {
-      errors.department = 'Department is required.';
+      errors.department = 'Department / Branch is required.';
     }
     
     if (!email.trim()) {
@@ -132,25 +222,6 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
     setValidationErrors(errors);
   }, [fullName, userId, designation, department, email, mobileNumber, gender, age, registeredUsers]);
 
-
-  // Enrollment arrays
-  const [capturedCount, setCapturedCount] = useState(0);
-  const [capturedPreviews, setCapturedPreviews] = useState<string[]>([]);
-  const [capturedDescriptors, setCapturedDescriptors] = useState<number[][]>([]);
-  const [avgDescriptor, setAvgDescriptor] = useState<number[] | null>(null);
-
-  const isProcessingFrameRef = useRef(false);
-  const consecutiveSpoofFramesRef = useRef(0);
-  const SPOOF_FRAME_THRESHOLD = 12; // Consecutive failures needed for warning
-  const stabilizationFramesRef = useRef(0);
-  const STABILIZATION_REQUIRED_FRAMES = 3; // Minimal stabilization — just 3 frames
-
-  // Auto-generate standard ID
-  useEffect(() => {
-    const randomNum = Math.floor(1000 + Math.random() * 9000);
-    setUserId(`VG-${randomNum}`);
-  }, []);
-
   // Prefill photo from warning alerts if present
   useEffect(() => {
     if (prefilledPhoto) {
@@ -161,8 +232,6 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
       img.src = prefilledPhoto;
       img.onload = async () => {
         try {
-          // If models are not loaded yet, fallback to a default zero array,
-          // but we prioritize extraction if models are available.
           if (typeof faceapi !== 'undefined' && faceapi.nets?.tinyFaceDetector?.params) {
             const detection = await faceapi
               .detectSingleFace(img, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.35 }))
@@ -173,14 +242,15 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
               setAvgDescriptor(Array.from(detection.descriptor));
               setCapturedDescriptors([Array.from(detection.descriptor)]);
               setCapturedPreviews([prefilledPhoto]);
+              setAnglePreviews({ FRONT: prefilledPhoto });
               setSuccessMsg("Face signature extracted successfully!");
             } else {
               setAvgDescriptor(new Array(128).fill(0.0));
-              setErrorMsg("No face detected in pre-loaded snapshot. Please adjust or recapture biometrics if matching fails.");
+              setErrorMsg("No face detected in snapshot. Please capture face biometrics.");
             }
           } else {
             setAvgDescriptor(new Array(128).fill(0.0));
-            setSuccessMsg("Snapshot loaded. Face signature will use fallback matching.");
+            setSuccessMsg("Snapshot loaded. Ready for enrollment.");
           }
         } catch (e) {
           console.error("Failed to extract embedding from pre-loaded photo", e);
@@ -189,7 +259,6 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
       };
     }
   }, [prefilledPhoto]);
-
 
   // Stop camera when it unmounts
   useEffect(() => {
@@ -204,7 +273,6 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
       const cacheName = 'visionguard-models-cache-v6';
       const originalFetch = window.fetch;
       
-      // Temporary fetch interceptor for model weights
       (window as any).fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = typeof input === 'string' ? input : (input as Request).url;
         
@@ -215,29 +283,23 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
             const cachedResponse = await cache.match(filename);
             
             if (cachedResponse) {
-              console.log(`[VisionGuard AI Cache] Loaded ${filename} from browser cache`);
               return cachedResponse;
             }
             
-            // Try fetching from local public folder
             try {
               const localResponse = await originalFetch(input, init);
               if (localResponse.ok) {
                 await cache.put(filename, localResponse.clone());
-                console.log(`[VisionGuard AI Cache] Cached local model: ${filename}`);
                 return localResponse;
               }
             } catch (localErr) {
-              console.log(`[VisionGuard AI Cache] Local fetch failed for ${filename}, trying CDN fallback...`);
+              // fallback
             }
             
-            // CDN Fallback download - use same CDN as index.html script tag
             const cdnUrl = `https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights/${filename}`;
-
             const cdnResponse = await originalFetch(cdnUrl, init);
             if (cdnResponse.ok) {
               await cache.put(filename, cdnResponse.clone());
-              console.log(`[VisionGuard AI Cache] Retrieved and cached from CDN: ${filename}`);
               return cdnResponse;
             }
           } catch (cacheErr) {
@@ -257,19 +319,18 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
       } catch (err) {
         console.error('Failed to load neural models in Register:', err);
       } finally {
-        window.fetch = originalFetch; // Restore fetch
+        window.fetch = originalFetch;
       }
     };
     loadModels();
   }, []);
 
-  // Web Camera Stream for enrollment - starts as soon as camera is activated
+  // Web Camera Stream for enrollment
   useEffect(() => {
     let active = true;
     let stream: MediaStream | null = null;
     
     if (cameraActive && videoRef.current) {
-      // Reset all biometric and liveness state to start with a completely fresh session state
       consecutiveSpoofFramesRef.current = 0;
       stabilizationFramesRef.current = 0;
       setErrorMsg('');
@@ -308,22 +369,218 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
     };
   }, [cameraActive, capturedPhoto]);
 
-  // Real-time Face Capture Scanning
+  // ── Head Pose Estimation using 68 Landmarks ─────────────────────────────────
+  const estimateFacePose = (landmarks: any): {
+    yaw: number;
+    pitchRatio: number;
+    detectedAngle: 'FRONT' | 'LEFT' | 'RIGHT' | 'UP' | 'DOWN';
+  } => {
+    const pts = landmarks?.positions;
+    if (!pts || pts.length < 68) {
+      return { yaw: 0, pitchRatio: 0.8, detectedAngle: 'FRONT' };
+    }
+
+    const noseTip = pts[30];
+    const chin = pts[8];
+    const leftEyeCenter = { x: (pts[36].x + pts[39].x) / 2, y: (pts[36].y + pts[39].y) / 2 };
+    const rightEyeCenter = { x: (pts[42].x + pts[45].x) / 2, y: (pts[42].y + pts[45].y) / 2 };
+    const eyeMidX = (leftEyeCenter.x + rightEyeCenter.x) / 2;
+    const eyeMidY = (leftEyeCenter.y + rightEyeCenter.y) / 2;
+    const eyeDistance = Math.hypot(rightEyeCenter.x - leftEyeCenter.x, rightEyeCenter.y - leftEyeCenter.y) || 1;
+
+    // Horizontal yaw ratio (-1 to 1)
+    const yaw = (noseTip.x - eyeMidX) / eyeDistance;
+
+    // Vertical pitch ratio
+    const noseToEyeDist = Math.max(1, Math.abs(noseTip.y - eyeMidY));
+    const chinToNoseDist = Math.max(1, Math.abs(chin.y - noseTip.y));
+    const pitchRatio = noseToEyeDist / chinToNoseDist;
+
+    let detectedAngle: 'FRONT' | 'LEFT' | 'RIGHT' | 'UP' | 'DOWN' = 'FRONT';
+
+    if (pitchRatio < 0.60) {
+      detectedAngle = 'UP';
+    } else if (pitchRatio > 1.05) {
+      detectedAngle = 'DOWN';
+    } else if (yaw < -0.11) {
+      detectedAngle = 'LEFT';
+    } else if (yaw > 0.11) {
+      detectedAngle = 'RIGHT';
+    } else {
+      detectedAngle = 'FRONT';
+    }
+
+    return { yaw, pitchRatio, detectedAngle };
+  };
+
+  // Blur Check
+  const isFrameBlurry = (videoEl: HTMLVideoElement, box: any): boolean => {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 64;
+      canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return false;
+
+      ctx.drawImage(videoEl, box.x, box.y, box.width, box.height, 0, 0, 64, 64);
+      const imgData = ctx.getImageData(0, 0, 64, 64);
+      const data = imgData.data;
+      const width = 64;
+      const height = 64;
+
+      let sum = 0;
+      let sumSq = 0;
+      const laplacian: number[] = [];
+
+      for (let y = 1; y < height - 1; y++) {
+        for (let x = 1; x < width - 1; x++) {
+          const idx = (y * width + x) * 4;
+          const val = data[idx] * 0.299 + data[idx+1] * 0.587 + data[idx+2] * 0.114;
+          const nVal = (
+            (data[idx - 4] * 0.299 + data[idx - 3] * 0.587 + data[idx - 2] * 0.114) +
+            (data[idx + 4] * 0.299 + data[idx + 5] * 0.587 + data[idx + 6] * 0.114) +
+            (data[(idx - width * 4)] * 0.299 + data[(idx - width * 4) + 1] * 0.587 + data[(idx - width * 4) + 2] * 0.114) +
+            (data[(idx + width * 4)] * 0.299 + data[(idx + width * 4) + 1] * 0.587 + data[(idx + width * 4) + 2] * 0.114)
+          );
+          const lap = val * 4 - nVal;
+          laplacian.push(lap);
+          sum += lap;
+        }
+      }
+
+      const mean = sum / laplacian.length;
+      for (const val of laplacian) {
+        sumSq += (val - mean) ** 2;
+      }
+
+      const variance = sumSq / laplacian.length;
+      return variance < 10.0;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  // Illumination Check
+  const isFrameTooDarkOrBright = (videoEl: HTMLVideoElement, box: any): { dark: boolean; bright: boolean; val: number } => {
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 64;
+      canvas.height = 64;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return { dark: false, bright: false, val: 128 };
+
+      ctx.drawImage(videoEl, box.x, box.y, box.width, box.height, 0, 0, 64, 64);
+      const imgData = ctx.getImageData(0, 0, 64, 64);
+      const data = imgData.data;
+
+      let totalLuminance = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const luminance = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+        totalLuminance += luminance;
+      }
+
+      const avgLuminance = totalLuminance / (64 * 64);
+      return {
+        dark: avgLuminance < 40,
+        bright: avgLuminance > 220,
+        val: avgLuminance
+      };
+    } catch (e) {
+      return { dark: false, bright: false, val: 128 };
+    }
+  };
+
+  // Liveness Score Check
+  const computeLivenessScore = (videoEl: HTMLVideoElement, box: any): { score: number; isLive: boolean; reason: string } => {
+    try {
+      const c = document.createElement('canvas');
+      c.width = 64; c.height = 64;
+      const ctx = c.getContext('2d');
+      if (!ctx) return { score: 100, isLive: true, reason: '' };
+
+      ctx.drawImage(videoEl, box.x, box.y, box.width, box.height, 0, 0, 64, 64);
+      const imgData = ctx.getImageData(0, 0, 64, 64);
+      const data = imgData.data;
+      const W = 64, H = 64;
+
+      let lapSum = 0;
+      const laps: number[] = [];
+      for (let y = 1; y < H - 1; y++) {
+        for (let x = 1; x < W - 1; x++) {
+          const i = (y * W + x) * 4;
+          const v = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
+          const n = (
+            (data[i-4]*0.299+data[i-3]*0.587+data[i-2]*0.114) +
+            (data[i+4]*0.299+data[i+5]*0.587+data[i+6]*0.114) +
+            (data[i-W*4]*0.299+data[i-W*4+1]*0.587+data[i-W*4+2]*0.114) +
+            (data[i+W*4]*0.299+data[i+W*4+1]*0.587+data[i+W*4+2]*0.114)
+          );
+          const lap = v * 4 - n;
+          laps.push(lap); lapSum += lap;
+        }
+      }
+      const lapMean = lapSum / laps.length;
+      let lapVarSum = 0;
+      for (const v of laps) lapVarSum += (v - lapMean) ** 2;
+      const textureVariance = lapVarSum / laps.length;
+
+      let gSum = 0;
+      for (let i = 0; i < data.length; i += 4)
+        gSum += data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
+      const gMean = gSum / (W * H);
+      let gDiffSq = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const g = data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
+        gDiffSq += (g - gMean) ** 2;
+      }
+      const stdDev = Math.sqrt(gDiffSq / (W * H));
+
+      let whitePixels = 0;
+      for (let i = 0; i < data.length; i += 4)
+        if (data[i] > 240 && data[i+1] > 240 && data[i+2] > 240) whitePixels++;
+      const glareRatio = whitePixels / (W * H);
+
+      let skinCount = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const r = data[i], g = data[i+1], b = data[i+2];
+        if (r > 60 && g > 30 && b > 15 && (r - g) > 10 && r > g && r > b) skinCount++;
+      }
+      const skinRatio = skinCount / (W * H);
+
+      let hfEdges = 0;
+      for (const v of laps) if (Math.abs(v) > 35) hfEdges++;
+      const moireRatio = hfEdges / laps.length;
+
+      let score = 100;
+      const reasons: string[] = [];
+
+      if (textureVariance < 1.0) { score -= 40; reasons.push('Flat surface detected'); }
+      else if (textureVariance > 600.0) { score -= 30; reasons.push('Moiré pattern detected'); }
+      if (stdDev < 4.0) { score -= 35; reasons.push('Low contrast uniformity'); }
+      if (glareRatio > 0.38) { score -= 50; reasons.push('Screen glare detected'); }
+      if (skinRatio < 0.02) { score -= 35; reasons.push('Implausible skin tone'); }
+      if (moireRatio > 0.38) { score -= 45; reasons.push('Periodic screen pixel grid'); }
+
+      score = Math.max(0, Math.min(100, score));
+      return { score, isLive: score >= 70, reason: reasons.join('; ') || 'Live face verified' };
+    } catch {
+      return { score: 50, isLive: false, reason: 'Liveness evaluation failed' };
+    }
+  };
+
+  // ── Multi-Angle Guided Face Capture Routine ────────────────────────────────
   const handleCapture = async () => {
     setErrorMsg('');
 
-    // Auto-start camera if not already active
     if (!cameraActive) {
       setCameraActive(true);
     }
 
-    // Wait for models to load
     if (!modelsLoaded) {
       setErrorMsg("AI models are still loading. Please wait a moment...");
       return;
     }
 
-    // Wait for camera video stream to be ready (up to 5 seconds)
     const waitForVideo = (): Promise<HTMLVideoElement | null> => {
       return new Promise((resolve) => {
         let attempts = 0;
@@ -342,195 +599,16 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
       });
     };
 
-    // Helper function to calculate Laplacian variance for blur check
-    const isFrameBlurry = (videoEl: HTMLVideoElement, box: any): boolean => {
-      try {
-        const canvas = document.createElement('canvas');
-        canvas.width = 64;
-        canvas.height = 64;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return false;
-
-        // Draw cropped face region to 64x64 canvas
-        ctx.drawImage(
-          videoEl,
-          box.x, box.y, box.width, box.height,
-          0, 0, 64, 64
-        );
-
-        const imgData = ctx.getImageData(0, 0, 64, 64);
-        const data = imgData.data;
-        const width = 64;
-        const height = 64;
-
-        // Compute Laplacian variance
-        let sum = 0;
-        let sumSq = 0;
-        const laplacian: number[] = [];
-
-        for (let y = 1; y < height - 1; y++) {
-          for (let x = 1; x < width - 1; x++) {
-            const idx = (y * width + x) * 4;
-            // Grayscale value of current pixel
-            const val = data[idx] * 0.299 + data[idx+1] * 0.587 + data[idx+2] * 0.114;
-
-            // Neighbors (4-neighborhood Laplacian filter)
-            const nVal = (
-              (data[idx - 4] * 0.299 + data[idx - 3] * 0.587 + data[idx - 2] * 0.114) +
-              (data[idx + 4] * 0.299 + data[idx + 5] * 0.587 + data[idx + 6] * 0.114) +
-              (data[(idx - width * 4)] * 0.299 + data[(idx - width * 4) + 1] * 0.587 + data[(idx - width * 4) + 2] * 0.114) +
-              (data[(idx + width * 4)] * 0.299 + data[(idx + width * 4) + 1] * 0.587 + data[(idx + width * 4) + 2] * 0.114)
-            );
-
-            const lap = val * 4 - nVal;
-            laplacian.push(lap);
-            sum += lap;
-          }
-        }
-
-        const mean = sum / laplacian.length;
-        for (const val of laplacian) {
-          sumSq += (val - mean) ** 2;
-        }
-
-        const variance = sumSq / laplacian.length;
-        console.log(`[Biometric Quality] Face score check. Blur score variance: ${variance.toFixed(2)}`);
-        // If variance is below 10.0, the image is blurry
-        return variance < 10.0;
-      } catch (e) {
-        return false;
-      }
-    };
-
-    // Helper function to check if the face is too dark or bright
-    const isFrameTooDarkOrBright = (videoEl: HTMLVideoElement, box: any): { dark: boolean; bright: boolean; val: number } => {
-      try {
-        const canvas = document.createElement('canvas');
-        canvas.width = 64;
-        canvas.height = 64;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return { dark: false, bright: false, val: 128 };
-
-        ctx.drawImage(
-          videoEl,
-          box.x, box.y, box.width, box.height,
-          0, 0, 64, 64
-        );
-
-        const imgData = ctx.getImageData(0, 0, 64, 64);
-        const data = imgData.data;
-
-        let totalLuminance = 0;
-        for (let i = 0; i < data.length; i += 4) {
-          const luminance = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
-          totalLuminance += luminance;
-        }
-
-        const avgLuminance = totalLuminance / (64 * 64);
-        return {
-          dark: avgLuminance < 40,
-          bright: avgLuminance > 220,
-          val: avgLuminance
-        };
-      } catch (e) {
-        return { dark: false, bright: false, val: 128 };
-      }
-    };
-
-    // ─── LIVENESS / ANTI-SPOOF ENGINE (used during enrollment scanning) ───────
-    // Computes a 0–100 liveness score for a cropped face region.
-    // Returns isLive=true only when score ≥ 70.
-    const computeLivenessScore = (videoEl: HTMLVideoElement, box: any): { score: number; isLive: boolean; reason: string } => {
-      try {
-        const c = document.createElement('canvas');
-        c.width = 64; c.height = 64;
-        const ctx = c.getContext('2d');
-        if (!ctx) return { score: 100, isLive: true, reason: '' };
-
-        ctx.drawImage(videoEl, box.x, box.y, box.width, box.height, 0, 0, 64, 64);
-        const imgData = ctx.getImageData(0, 0, 64, 64);
-        const data = imgData.data;
-        const W = 64, H = 64;
-
-        // 1. Texture variance (Laplacian)
-        let lapSum = 0;
-        const laps: number[] = [];
-        for (let y = 1; y < H - 1; y++) {
-          for (let x = 1; x < W - 1; x++) {
-            const i = (y * W + x) * 4;
-            const v = data[i] * 0.299 + data[i+1] * 0.587 + data[i+2] * 0.114;
-            const n = (
-              (data[i-4]*0.299+data[i-3]*0.587+data[i-2]*0.114) +
-              (data[i+4]*0.299+data[i+5]*0.587+data[i+6]*0.114) +
-              (data[i-W*4]*0.299+data[i-W*4+1]*0.587+data[i-W*4+2]*0.114) +
-              (data[i+W*4]*0.299+data[i+W*4+1]*0.587+data[i+W*4+2]*0.114)
-            );
-            const lap = v * 4 - n;
-            laps.push(lap); lapSum += lap;
-          }
-        }
-        const lapMean = lapSum / laps.length;
-        let lapVarSum = 0;
-        for (const v of laps) lapVarSum += (v - lapMean) ** 2;
-        const textureVariance = lapVarSum / laps.length;
-
-        // 2. Brightness uniformity (std-dev of grayscale)
-        let gSum = 0;
-        for (let i = 0; i < data.length; i += 4)
-          gSum += data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
-        const gMean = gSum / (W * H);
-        let gDiffSq = 0;
-        for (let i = 0; i < data.length; i += 4) {
-          const g = data[i]*0.299 + data[i+1]*0.587 + data[i+2]*0.114;
-          gDiffSq += (g - gMean) ** 2;
-        }
-        const stdDev = Math.sqrt(gDiffSq / (W * H));
-
-        // 3. Specular glare (very bright near-white pixels → screen backlight)
-        let whitePixels = 0;
-        for (let i = 0; i < data.length; i += 4)
-          if (data[i] > 240 && data[i+1] > 240 && data[i+2] > 240) whitePixels++;
-        const glareRatio = whitePixels / (W * H);
-
-        // 4. Skin-tone plausibility
-        let skinCount = 0;
-        for (let i = 0; i < data.length; i += 4) {
-          const r = data[i], g = data[i+1], b = data[i+2];
-          if (r > 60 && g > 30 && b > 15 && (r - g) > 10 && r > g && r > b) skinCount++;
-        }
-        const skinRatio = skinCount / (W * H);
-
-        // 5. Moiré / high-frequency grid (screen pixel pattern)
-        let hfEdges = 0;
-        for (const v of laps) if (Math.abs(v) > 35) hfEdges++;
-        const moireRatio = hfEdges / laps.length;
-
-        let score = 100;
-        const reasons: string[] = [];
-
-        if (textureVariance < 1.0) { score -= 40; reasons.push('Flat surface/paper (low texture variance)'); }
-        else if (textureVariance > 600.0) { score -= 30; reasons.push('Extreme texture variance (moiré pattern)'); }
-        if (stdDev < 4.0) { score -= 35; reasons.push('Low contrast uniformity (backlit surface / photo)'); }
-        if (glareRatio > 0.38) { score -= 50; reasons.push('High specular glare (specular reflection detected)'); }
-        if (skinRatio < 0.02) { score -= 35; reasons.push('Implausible skin spectrum (spectral color bias)'); }
-        if (moireRatio > 0.38) { score -= 45; reasons.push('Periodic pixel grid (printed photo attack)'); }
-
-        score = Math.max(0, Math.min(100, score));
-        return { score, isLive: score >= 70, reason: reasons.join('; ') || 'Liveness signals verified' };
-      } catch {
-        return { score: 50, isLive: false, reason: 'Liveness evaluation failed' };
-      }
-    };
-    // ──────────────────────────────────────────────────────────────────────────
-
-    setScanStepLabel('Starting camera...');
     setIsScanning(true);
-    isScanningRef.current = true; // Sync ref immediately — state update is async, ref is synchronous
+    isScanningRef.current = true;
     setScanProgress(0);
     setCapturedCount(0);
-    // Always reset spoof and stabilization counters on scan start/restart
+    setCurrentAngleStageIndex(0);
+    setAnglePreviews({});
+    setAngleFrameCounts({ FRONT: 0, LEFT: 0, RIGHT: 0, UP: 0, DOWN: 0 });
     consecutiveSpoofFramesRef.current = 0;
     stabilizationFramesRef.current = 0;
+    currentStageHoldFramesRef.current = 0;
     setErrorMsg('');
 
     const video = await waitForVideo();
@@ -541,46 +619,41 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
       return;
     }
 
-    setScanStepLabel('👤 Front View: Look straight at camera...');
+    setScanStepLabel(`Angle 1/5: ${ANGLE_STAGES[0].name} — ${ANGLE_STAGES[0].instruction}`);
 
     const tempImages: string[] = [];
     const tempDescriptors: Float32Array[] = [];
+    const tempAngleTags: string[] = [];
+    const stagePreviews: { [key: string]: string } = {};
+    const stageCounts: { [key: string]: number } = { FRONT: 0, LEFT: 0, RIGHT: 0, UP: 0, DOWN: 0 };
 
-    const TARGET_FRAMES = 10; // exactly 10 high-quality unique frames
-    let framesEnrolled = 0;
+    let currentStageIndex = 0;
     let consecutiveBlurFails = 0;
     isProcessingFrameRef.current = false;
-    // Reset spoof and stabilization counters when starting a fresh interval
-    consecutiveSpoofFramesRef.current = 0;
-    stabilizationFramesRef.current = 0;
 
-    // Reset components previews
     setCapturedPreviews([]);
     setCapturedDescriptors([]);
+    setCapturedAngleTags([]);
     setAvgDescriptor(null);
 
-    // Kill any previous timeout before starting a new one
     if (captureIntervalRef.current !== null) {
       clearTimeout(captureIntervalRef.current);
       captureIntervalRef.current = null;
     }
-    isProcessingFrameRef.current = false;
-    // Sync the ref so the recursive closure reads the correct live value
-    isScanningRef.current = true;
 
-    // Recursive frame capture routine — uses isScanningRef (NOT isScanning state)
-    // to avoid the stale-closure bug where isScanning always reads the initial false value.
+    const TOTAL_TARGET_FRAMES = 10; // 2 frames per each of the 5 angles
+
     const runCaptureFrame = async () => {
       if (!isScanningRef.current) return;
 
-      if (framesEnrolled >= TARGET_FRAMES) {
+      // When all 5 angle stages are finished
+      if (currentStageIndex >= ANGLE_STAGES.length) {
         if (captureIntervalRef.current !== null) {
           clearTimeout(captureIntervalRef.current);
           captureIntervalRef.current = null;
         }
         isProcessingFrameRef.current = false;
 
-        // Complete registration logic
         if (tempDescriptors.length > 0) {
           const averaged = new Float32Array(128);
           for (let i = 0; i < 128; i++) {
@@ -589,7 +662,7 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
             averaged[i] = sum / tempDescriptors.length;
           }
 
-          // Duplicate detection check
+          // Duplicate detection check against registered users
           let duplicateUser: User | null = null;
           for (const u of registeredUsers) {
             if (u.faceEmbedding) {
@@ -605,7 +678,7 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
           }
 
           if (duplicateUser) {
-            setErrorMsg(`Duplicate registration prevented. Face matches existing user: ${(duplicateUser as User).name}.`);
+            setErrorMsg(`Duplicate registration prevented. Face biometrics match existing user: ${(duplicateUser as User).name}.`);
             isScanningRef.current = false;
             setIsScanning(false);
             setCapturedPreviews([]);
@@ -617,12 +690,13 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
           setCapturedPhoto(tempImages[0] || '');
           setCapturedPreviews(tempImages);
           setCapturedDescriptors(tempDescriptors.map(d => Array.from(d)));
+          setCapturedAngleTags(tempAngleTags);
           setScanProgress(100);
           isScanningRef.current = false;
           setIsScanning(false);
-          setSuccessMsg('Face Registration Completed Successfully');
+          setSuccessMsg('5-Angle Biometric Facial Registration Completed Successfully!');
         } else {
-          setErrorMsg('No face detected in scan. Please face the camera directly and retry.');
+          setErrorMsg('No face detected. Please face camera directly and retry.');
           isScanningRef.current = false;
           setIsScanning(false);
           setScanProgress(0);
@@ -638,7 +712,6 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
           return;
         }
 
-        // Run detection — evaluate every frame independently
         const detections = await faceapi
           .detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.35 }))
           .withFaceLandmarks()
@@ -646,54 +719,37 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
 
         if (!captureIntervalRef.current) return;
 
-        // ── MULTIPLE FACES: pause accumulation, keep scanning ─────────────────
         if (detections.length > 1) {
           consecutiveSpoofFramesRef.current = 0;
           setErrorMsg('');
-          setScanStepLabel('⚠️ MULTIPLE PERSONS DETECTED — Only one person can register at a time. Please remove extra persons from view...');
+          setScanStepLabel('⚠️ Multiple faces detected! Only one person may be in camera view.');
           return;
         }
 
-        // ── NO FACE: clear spoof warning immediately, wait ────────────────────
         if (detections.length === 0) {
           if (consecutiveSpoofFramesRef.current > 0) {
             consecutiveSpoofFramesRef.current = 0;
             setErrorMsg('');
           }
-          setScanStepLabel('❌ Face not detected. Position yourself clearly in front of camera...');
+          const currentStage = ANGLE_STAGES[currentStageIndex];
+          setScanStepLabel(`❌ Face not detected. Position yourself clearly — ${currentStage?.instruction}`);
           return;
         }
 
         const detection = detections[0];
         const box = detection.detection.box;
 
-        // Skip duplicate frames if the face has not moved or changed at all
-        if (tempDescriptors.length > 0) {
-          const lastDesc = tempDescriptors[tempDescriptors.length - 1];
-          let sum = 0;
-          for (let i = 0; i < 128; i++) {
-            const diff = detection.descriptor[i] - lastDesc[i];
-            sum += diff * diff;
-          }
-          const dist = Math.sqrt(sum);
-          // Threshold 0.10: accept any frame where the person moved at least slightly.
-          // 0.05 was too strict — natural micro-movements (breathing, sway) were rejected.
-          if (dist < 0.10) {
-            return;
-          }
-        }
-
-        // ── STABILIZATION PHASE ────────────────────────────────────────────────
+        // Camera stabilization phase
         if (stabilizationFramesRef.current < STABILIZATION_REQUIRED_FRAMES) {
           stabilizationFramesRef.current++;
-          setScanStepLabel(`📸 Stabilizing camera exposure and focus... (${stabilizationFramesRef.current}/${STABILIZATION_REQUIRED_FRAMES})`);
+          setScanStepLabel(`📸 Stabilizing exposure... (${stabilizationFramesRef.current}/${STABILIZATION_REQUIRED_FRAMES})`);
           setErrorMsg('');
           return;
         }
 
-        // ── FACE QUALITY CHECK ─────────────────────────────────────────────────
+        // Quality check
         if (box.width < 80 || box.height < 80) {
-          setScanStepLabel('⚠️ Quality Alert: Move closer to the camera...');
+          setScanStepLabel('⚠️ Move closer to the camera...');
           return;
         }
 
@@ -701,7 +757,7 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
         if (isBlurry) {
           consecutiveBlurFails++;
           if (consecutiveBlurFails > 8) {
-            setScanStepLabel('⚠️ Quality Alert: Hold still, frame is blurry...');
+            setScanStepLabel('⚠️ Hold steady, camera is refocusing...');
           }
           return;
         }
@@ -709,48 +765,22 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
 
         const lightCheck = isFrameTooDarkOrBright(video, box);
         if (lightCheck.dark) {
-          setScanStepLabel('⚠️ Quality Alert: Too dark! Adjust illumination...');
+          setScanStepLabel('⚠️ Too dark! Please increase ambient lighting...');
           return;
         }
         if (lightCheck.bright) {
-          setScanStepLabel('⚠️ Quality Alert: Overexposed! Adjust lighting...');
+          setScanStepLabel('⚠️ Overexposed! Please reduce direct glare...');
           return;
         }
 
-        // ── LIVENESS / ANTI-SPOOF CHECK ──────────────────────────────────────
+        // Liveness check
         const liveness = computeLivenessScore(video, box);
-
-        console.log(`[VisionGuard Registration Debug]`, {
-          faceDetected: 'YES',
-          faceQualityScore: 'HIGH (Pass)',
-          livenessScore: liveness.score,
-          antiSpoofScore: liveness.score,
-          recognitionConfidence: 'N/A',
-          failureReason: liveness.isLive ? 'None' : liveness.reason
-        });
-
         if (!liveness.isLive) {
-          if (liveness.score >= 50 && liveness.score < 70) {
-            consecutiveSpoofFramesRef.current++;
-            const promptIndex = Math.floor(consecutiveSpoofFramesRef.current / 4) % 3;
-            const prompts = [
-              "⚠️ Liveness borderline. Please blink naturally...",
-              "⚠️ Liveness borderline. Please turn your head slightly left...",
-              "⚠️ Liveness borderline. Please turn your head slightly right..."
-            ];
-            setScanStepLabel(prompts[promptIndex]);
-            if (consecutiveSpoofFramesRef.current >= 18) {
-              setErrorMsg('🚫 Registration Failed - Live Face Verification Failed.');
-            }
+          consecutiveSpoofFramesRef.current++;
+          if (consecutiveSpoofFramesRef.current >= SPOOF_FRAME_THRESHOLD) {
+            setErrorMsg('🚫 Live face verification failed. Ensure natural lighting.');
           } else {
-            consecutiveSpoofFramesRef.current++;
-            if (consecutiveSpoofFramesRef.current >= SPOOF_FRAME_THRESHOLD) {
-              setScanStepLabel('');
-              setErrorMsg('🚫 Registration Failed - Live Face Verification Failed.');
-            } else {
-              setScanStepLabel(`⚠️ Verifying liveness... (${consecutiveSpoofFramesRef.current}/${SPOOF_FRAME_THRESHOLD})`);
-              setErrorMsg('');
-            }
+            setScanStepLabel(`⚠️ Verifying liveness... (${consecutiveSpoofFramesRef.current}/${SPOOF_FRAME_THRESHOLD})`);
           }
           return;
         }
@@ -760,26 +790,43 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
           setErrorMsg('');
         }
 
-        consecutiveBlurFails = 0;
-        framesEnrolled++;
+        // ── Check Current Target Angle ─────────────────────────────────────────
+        const currentStage = ANGLE_STAGES[currentStageIndex];
+        const pose = estimateFacePose(detection.landmarks);
 
-        const displayCount = Math.min(TARGET_FRAMES, framesEnrolled);
-        setCapturedCount(displayCount);
-        const progressPct = Math.round((displayCount / TARGET_FRAMES) * 100);
-        setScanProgress(progressPct);
+        // Verification criteria:
+        // Either the estimated angle matches the expected stage,
+        // OR the user holds a steady verified pose for 8 frames (fail-safe tolerance)
+        const isAngleMatched = (pose.detectedAngle === currentStage.key);
+        currentStageHoldFramesRef.current++;
 
-        let guidance = '';
-        if (displayCount <= 3) {
-          guidance = '👤 Front View: Look straight at camera...';
-        } else if (displayCount <= 7) {
-          guidance = '👤 Profile View: Turn head slightly Left...';
-        } else {
-          guidance = '👤 Profile View: Turn head slightly Right...';
+        const isAcceptedForStage = isAngleMatched || (currentStageHoldFramesRef.current >= 8);
+
+        if (!isAcceptedForStage) {
+          setScanStepLabel(`Angle ${currentStageIndex + 1}/5: ${currentStage.name} — ${currentStage.instruction} (${currentStage.tip})`);
+          return;
         }
 
-        setScanStepLabel(`Capturing Face Samples — ${displayCount} / ${TARGET_FRAMES} (${progressPct}%) — ${guidance}`);
+        // If previous descriptor is identical, require slight micro-movement
+        if (tempDescriptors.length > 0) {
+          const lastDesc = tempDescriptors[tempDescriptors.length - 1];
+          let diffSq = 0;
+          for (let i = 0; i < 128; i++) {
+            const diff = detection.descriptor[i] - lastDesc[i];
+            diffSq += diff * diff;
+          }
+          // Accept frame if moved slightly
+          if (Math.sqrt(diffSq) < 0.08 && stageCounts[currentStage.key] > 0) {
+            return;
+          }
+        }
+
+        // ── Capture and store verified frame for this angle ──────────────────
+        stageCounts[currentStage.key] = (stageCounts[currentStage.key] || 0) + 1;
+        setAngleFrameCounts({ ...stageCounts });
 
         tempDescriptors.push(detection.descriptor);
+        tempAngleTags.push(currentStage.name);
 
         const tempCanvas = document.createElement('canvas');
         tempCanvas.width = 200;
@@ -787,9 +834,37 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
         const tempCtx = tempCanvas.getContext('2d');
         if (tempCtx) {
           tempCtx.drawImage(video, 0, 0, 200, 150);
-          const dataUrl = tempCanvas.toDataURL('image/jpeg', 0.5);
+          const dataUrl = tempCanvas.toDataURL('image/jpeg', 0.6);
           tempImages.push(dataUrl);
+
+          // Update stage thumbnail preview
+          if (!stagePreviews[currentStage.key]) {
+            stagePreviews[currentStage.key] = dataUrl;
+            setAnglePreviews({ ...stagePreviews });
+          }
+
           setCapturedPreviews(prev => [dataUrl, ...prev.slice(0, 11)]);
+        }
+
+        const totalEnrolled = tempImages.length;
+        setCapturedCount(totalEnrolled);
+        const progressPct = Math.round((totalEnrolled / TOTAL_TARGET_FRAMES) * 100);
+        setScanProgress(progressPct);
+
+        // Check if current angle target count reached
+        if (stageCounts[currentStage.key] >= currentStage.targetCount) {
+          currentStageHoldFramesRef.current = 0;
+          currentStageIndex++;
+          setCurrentAngleStageIndex(currentStageIndex);
+
+          if (currentStageIndex < ANGLE_STAGES.length) {
+            const nextStage = ANGLE_STAGES[currentStageIndex];
+            setScanStepLabel(`✓ ${currentStage.name} captured! Next: ${nextStage.name} — ${nextStage.instruction}`);
+          } else {
+            setScanStepLabel('All 5 required angles captured! Processing biometric template...');
+          }
+        } else {
+          setScanStepLabel(`Angle ${currentStageIndex + 1}/5: ${currentStage.name} — Frame ${stageCounts[currentStage.key]}/${currentStage.targetCount} (${progressPct}%)`);
         }
       };
 
@@ -799,23 +874,16 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
         console.error('Enrollment frame error:', err);
       } finally {
         isProcessingFrameRef.current = false;
-        // CRITICAL: Always reschedule so the completion block at the top of
-        // runCaptureFrame can execute after the 12th frame is captured.
-        // The framesEnrolled >= TARGET_FRAMES check inside runCaptureFrame stops the loop.
-        // Previously this condition included `framesEnrolled < TARGET_FRAMES` which
-        // blocked the final completion call — registration would hang after 12 captures.
         if (isScanningRef.current && captureIntervalRef.current !== null) {
-          captureIntervalRef.current = setTimeout(runCaptureFrame, 0);
+          captureIntervalRef.current = setTimeout(runCaptureFrame, 60);
         }
       }
     };
 
-    // ── CRITICAL: Start the recursive loop immediately ──
     captureIntervalRef.current = setTimeout(runCaptureFrame, 0);
   };
 
-
-
+  // ── Register Submission ──────────────────────────────────────────────────────
   const handleRegister = (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
@@ -826,18 +894,17 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
     }
 
     if (!capturedPhoto || !avgDescriptor) {
-      setErrorMsg('Facial biometric capture is required.');
+      setErrorMsg('Multi-angle facial biometric capture is required.');
       return;
     }
 
-    // Get IST timestamp
     const now = new Date();
     const istDate = now.toLocaleDateString('en-IN', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'Asia/Kolkata' });
     const istTime = now.toLocaleTimeString('en-IN', { hour12: false, timeZone: 'Asia/Kolkata' });
 
     setIsSubmitting(true);
     setErrorMsg('');
-    setSuccessMsg('Uploading biometric assets to cloud gateway...');
+    setSuccessMsg('Uploading biometric assets to Supabase storage...');
 
     setTimeout(async () => {
       try {
@@ -845,7 +912,6 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
         let finalFaceImages: string[] = [];
 
         if (isSupabaseConfigured && supabase) {
-          // Upload profile photo
           setSuccessMsg('Uploading profile photo template...');
           const profileUrl = await uploadImageToSupabase(capturedPhoto, userId, 'profile.jpg');
           if (!profileUrl) {
@@ -853,9 +919,9 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
           }
           finalProfilePhoto = profileUrl;
 
-          // Upload all captured previews (up to 40 frames) to Supabase Storage first
+          // Upload all captured previews (across the 5 angles)
           for (let i = 0; i < capturedPreviews.length; i++) {
-            setSuccessMsg(`Uploading face signature template ${i + 1}/${capturedPreviews.length}...`);
+            setSuccessMsg(`Uploading multi-angle biometric template ${i + 1}/${capturedPreviews.length}...`);
             const imgUrl = await uploadImageToSupabase(capturedPreviews[i], userId, `face_${i}.jpg`);
             if (!imgUrl) {
               throw new Error(`Failed to upload face image ${i + 1} to Supabase storage.`);
@@ -876,7 +942,7 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
           lastUpdatedDate: istDate,
           lastUpdatedTime: istTime,
           faceEmbedding: JSON.stringify(avgDescriptor),
-          totalCapturedImages: capturedPreviews.length || 12,
+          totalCapturedImages: capturedPreviews.length || 10,
           status: 'Active',
           is_enrolled: true,
           enrollment_type: 'Biometric',
@@ -897,24 +963,25 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
           last_updated_time: istTime
         };
 
-        // 1. Call onRegister first to create the registered_user record (satisfying Foreign Key)
-        setSuccessMsg('Synchronizing profile registry...');
+        setSuccessMsg('Synchronizing personnel registry in Supabase...');
         await onRegister(newUser);
 
-        // 2. Now that the user exists in database, save the individual embeddings in face_images table
+        // Save individual angle descriptors in face_images table
         if (isSupabaseConfigured && supabase) {
-          // Replace old embeddings for this user ID instead of mixing old and new descriptors
           const { error: deleteError } = await supabase
             .from('face_images')
             .delete()
             .eq('user_id', userId);
 
           if (deleteError) {
-            console.warn('[VisionGuard] Failed to delete old face embeddings (non-fatal):', deleteError.message);
+            console.warn('[VisionGuard] Failed to delete old face embeddings:', deleteError.message);
           }
 
           for (let i = 0; i < finalFaceImages.length; i++) {
-            setSuccessMsg(`Saving face signature index ${i + 1}/${finalFaceImages.length}...`);
+            const angleStageIndex = Math.min(4, Math.floor(i / 2));
+            const angleName = ANGLE_STAGES[angleStageIndex]?.name || `Angle_${i}`;
+
+            setSuccessMsg(`Saving biometric angle [${angleName}] ${i + 1}/${finalFaceImages.length}...`);
             const imgUrl = finalFaceImages[i];
             const desc = capturedDescriptors[i] || avgDescriptor;
 
@@ -925,18 +992,18 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
                 user_id: userId,
                 image_url: imgUrl,
                 embedding: JSON.stringify(desc),
-                capture_angle: `Angle_${i}`,
+                capture_angle: angleName,
                 created_at: new Date().toISOString()
               });
 
             if (dbError) {
-              throw new Error(`Database error saving face signature ${i + 1}: ${dbError.message}`);
+              throw new Error(`Database error saving face angle ${i + 1}: ${dbError.message}`);
             }
           }
         }
 
         if (onClearPrefilledPhoto) onClearPrefilledPhoto();
-        setSuccessMsg('Enrollment successfully completed!');
+        setSuccessMsg('✓ Registration successfully completed via Biometric Enrollment!');
         setTimeout(() => {
           if (onSuccess) onSuccess();
         }, 1500);
@@ -949,29 +1016,19 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
     }, 50);
   };
 
-
-  // ── cancelScan: THE canonical cleanup function ─────────────────────────────
-  // Stops the capture interval, releases the camera stream, and resets ALL
-  // scan state. Must be called before navigating away or restarting a scan.
   const cancelScan = () => {
-    // 1. Stop the recursive loop FIRST via ref (avoids stale-closure continuation)
     isScanningRef.current = false;
-    // 2. Kill any pending timeout
     if (captureIntervalRef.current !== null) {
       clearTimeout(captureIntervalRef.current);
       captureIntervalRef.current = null;
     }
-    // 3. Release the frame lock so future scans can start
     isProcessingFrameRef.current = false;
-    // 4. Reset ALL spoof state
     consecutiveSpoofFramesRef.current = 0;
-    // 4. Stop the camera stream tracks directly
     const video = videoRef.current;
     if (video && video.srcObject) {
       (video.srcObject as MediaStream).getTracks().forEach(track => track.stop());
       video.srcObject = null;
     }
-    // 5. Reset all scan / enrollment state
     setIsScanning(false);
     setScanProgress(0);
     setScanStepLabel('');
@@ -980,35 +1037,37 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
     setCapturedCount(0);
     setCapturedPreviews([]);
     setCapturedDescriptors([]);
+    setCapturedAngleTags([]);
     setCapturedPhoto(null);
     setAvgDescriptor(null);
-    // 6. Turn camera off at App level so no other component holds the stream
+    setCurrentAngleStageIndex(0);
+    setAnglePreviews({});
+    setAngleFrameCounts({ FRONT: 0, LEFT: 0, RIGHT: 0, UP: 0, DOWN: 0 });
     setCameraActive(false);
   };
 
   const handleRecapture = () => {
-    // Cancel any in-progress scan first, then restart camera
     cancelScan();
     if (onClearPrefilledPhoto) onClearPrefilledPhoto();
-    // Small delay to let the camera stream fully release before re-opening
     setTimeout(() => setCameraActive(true), 150);
   };
 
-
-
   return (
-    <div className="fade-in glass-panel" style={{ padding: '30px', maxWidth: '900px', margin: '0 auto' }}>
+    <div className="fade-in glass-panel" style={{ padding: '30px', maxWidth: '980px', margin: '0 auto' }}>
       
-      {/* Page Title */}
-      <div style={{ borderBottom: '1px solid var(--border-glass)', paddingBottom: '20px', marginBottom: '28px' }}>
-        <h2 style={{ fontFamily: 'Orbitron', fontSize: '1.6rem', color: '#ffffff', display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <UserPlus size={24} style={{ color: 'var(--color-cyan)' }} />
-          Authorized User Enrollment
-        </h2>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px', marginTop: '6px' }}>
-          <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem', margin: 0 }}>
-            Register authorized users for face recognition-based access control to restricted areas.
-          </p>
+      {/* Header Section */}
+      <div style={{ borderBottom: '1px solid var(--border-glass)', paddingBottom: '20px', marginBottom: '24px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '14px' }}>
+          <div>
+            <h2 style={{ fontFamily: 'Orbitron', fontSize: '1.6rem', color: '#ffffff', display: 'flex', alignItems: 'center', gap: '10px', margin: 0 }}>
+              <UserPlus size={24} style={{ color: 'var(--color-cyan)' }} />
+              Personnel Registration Portal
+            </h2>
+            <p style={{ color: 'var(--text-muted)', fontSize: '0.88rem', margin: '6px 0 0 0' }}>
+              Enroll personnel with 5-angle biometric facial verification for face-recognition-based access control.
+            </p>
+          </div>
+
           <div style={{
             background: 'rgba(0, 243, 255, 0.1)',
             border: '1px solid rgba(0, 243, 255, 0.3)',
@@ -1029,466 +1088,549 @@ export const RegisterUser: React.FC<RegisterUserProps> = ({
         </div>
       </div>
 
-      <form onSubmit={handleRegister} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px' }}>
-        
-        {/* Left Column: Form Details */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+
+
+      {/* ─────────────────────────────────────────────────────────────────────────── */}
+      {/* MAIN REGISTRATION FORM */}
+      {/* ─────────────────────────────────────────────────────────────────────────── */}
+      {(
+        <form onSubmit={handleRegister} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px' }}>
           
-          {errorMsg && (
-            <div className="glass-panel" style={{
-              padding: '12px 18px',
-              background: 'rgba(255, 59, 48, 0.1)',
-              border: '1px solid var(--color-red)',
-              color: 'var(--color-red)',
-              borderRadius: '12px',
-              fontSize: '0.85rem',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px'
-            }}>
-              <AlertTriangle size={16} />
-              <span>{errorMsg}</span>
-            </div>
-          )}
+          {/* Left Column: Form Details */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
 
-          {successMsg && (
-            <div className="glass-panel" style={{
-              padding: '12px 18px',
-              background: 'rgba(0, 255, 136, 0.1)',
-              border: '1px solid var(--color-emerald)',
-              color: 'var(--color-emerald)',
-              borderRadius: '12px',
-              fontSize: '0.85rem',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '8px'
-            }}>
-              <CheckCircle2 size={16} />
-              <span>{successMsg}</span>
-            </div>
-          )}
-
-          <div className="cyber-input-group">
-            <label className="cyber-input-label">Personnel Full Name *</label>
-            <input 
-              type="text" 
-              className="cyber-input" 
-              placeholder="e.g. Bruce Wayne" 
-              value={fullName}
-              onChange={(e) => setFullName(e.target.value)}
-              disabled={isScanning}
-              required
-            />
-            {validationErrors.fullName && (
-              <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
-                {validationErrors.fullName}
-              </span>
-            )}
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-            <div className="cyber-input-group">
-              <label className="cyber-input-label">Gender *</label>
-              <select 
-                className="cyber-input cyber-select"
-                value={gender}
-                onChange={(e) => setGender(e.target.value)}
-                disabled={isScanning}
-              >
-                <option value="Male">Male</option>
-                <option value="Female">Female</option>
-                <option value="Other">Other</option>
-              </select>
-              {validationErrors.gender && (
-                <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
-                  {validationErrors.gender}
-                </span>
-              )}
-            </div>
-            <div className="cyber-input-group">
-              <label className="cyber-input-label">Age *</label>
-              <input 
-                type="number" 
-                className="cyber-input" 
-                placeholder="e.g. 34" 
-                value={age}
-                onChange={(e) => setAge(e.target.value === '' ? '' : Number(e.target.value))}
-                disabled={isScanning}
-                min={1}
-                max={120}
-              />
-              {validationErrors.age && (
-                <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
-                  {validationErrors.age}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-            <div className="cyber-input-group">
-              <label className="cyber-input-label">Designation *</label>
-              <select 
-                className="cyber-input cyber-select"
-                value={designation}
-                onChange={(e) => setDesignation(e.target.value)}
-                disabled={isScanning}
-              >
-                <option value="Staff Officer">Staff Officer</option>
-                <option value="Administrator">Administrator</option>
-                <option value="Security Officer">Security Officer</option>
-                <option value="Technician">Technician</option>
-                <option value="Engineer">Engineer</option>
-                <option value="VIP">VIP</option>
-                <option value="Contractor">Contractor</option>
-              </select>
-              {validationErrors.designation && (
-                <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
-                  {validationErrors.designation}
-                </span>
-              )}
-            </div>
-            <div className="cyber-input-group">
-              <label className="cyber-input-label">Department *</label>
-              <input 
-                type="text" 
-                className="cyber-input" 
-                placeholder="e.g. R&D" 
-                value={department}
-                onChange={(e) => setDepartment(e.target.value)}
-                disabled={isScanning}
-              />
-              {validationErrors.department && (
-                <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
-                  {validationErrors.department}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-            <div className="cyber-input-group">
-              <label className="cyber-input-label">Email Address *</label>
-              <input 
-                type="email" 
-                className="cyber-input" 
-                placeholder="e.g. bruce@wayne.com" 
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                disabled={isScanning}
-                required
-              />
-              {validationErrors.email && (
-                <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
-                  {validationErrors.email}
-                </span>
-              )}
-            </div>
-            <div className="cyber-input-group">
-              <label className="cyber-input-label">Mobile Number *</label>
-              <input 
-                type="text" 
-                className="cyber-input" 
-                placeholder="e.g. 9876543210" 
-                value={mobileNumber}
-                onChange={(e) => setMobileNumber(e.target.value)}
-                disabled={isScanning}
-                required
-              />
-              {validationErrors.mobileNumber && (
-                <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
-                  {validationErrors.mobileNumber}
-                </span>
-              )}
-            </div>
-          </div>
-
-          <div className="cyber-input-group">
-            <label className="cyber-input-label">Employee ID / User ID *</label>
-            <input 
-              type="text" 
-              className="cyber-input" 
-              placeholder="e.g. VG-4829" 
-              value={userId}
-              onChange={(e) => setUserId(e.target.value)}
-              disabled={isScanning}
-            />
-            {validationErrors.userId && (
-              <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
-                {validationErrors.userId}
-              </span>
-            )}
-          </div>
-
-          <div style={{
-            padding: '16px',
-            borderRadius: '12px',
-            background: 'rgba(255,255,255,0.02)',
-            border: '1px solid var(--border-glass)',
-            fontSize: '0.8rem',
-            color: 'var(--text-muted)',
-            display: 'flex',
-            gap: '10px'
-          }}>
-            <Info size={24} style={{ color: 'var(--color-cyan)', flexShrink: 0 }} />
-            <p style={{ lineHeight: '1.4' }}>
-              Facial features are processed locally. Multi-angle scanning compiles 10 photos to train the recognition vector descriptor.
-            </p>
-          </div>
-
-          {/* Form Action Buttons */}
-          <div style={{ display: 'flex', gap: '12px', marginTop: '16px', justifyContent: 'center' }}>
-            <button 
-              type="submit" 
-              className="btn-3d btn-cyan" 
-              style={{ padding: '8px 18px', fontSize: '0.82rem', borderRadius: '10px', minWidth: '130px' }}
-              disabled={isScanning || !capturedPhoto || isSubmitting}
-            >
-              {isSubmitting ? (
-                <>
-                  <RefreshCw className="animate-spin" size={14} style={{ animation: 'spin 1s linear infinite' }} />
-                  Registering...
-                </>
-              ) : 'Register Node'}
-            </button>
-            <button 
-              type="button" 
-              className="btn-3d btn-secondary" 
-              style={{ padding: '8px 18px', fontSize: '0.82rem', borderRadius: '10px', minWidth: '130px' }}
-              onClick={() => {
-                cancelScan();
-                onCancel();
-              }}
-              disabled={isSubmitting}
-            >
-              {isScanning ? '⏹ Stop & Cancel' : 'Cancel'}
-            </button>
-          </div>
-
-        </div>
-
-        {/* Right Column: Biometric Camera Enroll Capture */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', alignItems: 'center' }}>
-          
-          <span className="cyber-input-label" style={{ alignSelf: 'flex-start' }}>Biometric Scanner Capture</span>
-          
-          {/* Webcam Viewport Frame */}
-          <div style={{
-            position: 'relative',
-            width: '100%',
-            aspectRatio: '4/3',
-            background: '#010108',
-            border: '1px solid var(--border-glass)',
-            borderRadius: '16px',
-            overflow: 'hidden',
-            boxShadow: 'var(--shadow-3d)'
-          }}>
-            {/* Real Video Stream */}
-            {cameraActive && !capturedPhoto && (
-              <video 
-                ref={videoRef}
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover'
-                }}
-                muted
-                playsInline
-              />
-            )}
-
-            {/* Hidden Canvas */}
-            <canvas ref={canvasRef} width={400} height={300} style={{ display: 'none' }} />
-
-            {/* Captured Photo Preview */}
-            {capturedPhoto && (
-              <img 
-                src={capturedPhoto} 
-                alt="Captured Face" 
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover'
-                }}
-              />
-            )}
-
-            {successMsg && (successMsg.includes('Completed') || successMsg.includes('successful')) && (
-              <div style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                height: '100%',
+            {/* Error Message */}
+            {errorMsg && (
+              <div className="glass-panel" style={{
+                padding: '12px 18px',
+                background: 'rgba(255, 59, 48, 0.1)',
+                border: '1px solid var(--color-red)',
+                color: 'var(--color-red)',
+                borderRadius: '12px',
+                fontSize: '0.85rem',
                 display: 'flex',
-                flexDirection: 'column',
                 alignItems: 'center',
-                justifyContent: 'center',
-                background: 'rgba(1, 1, 8, 0.85)',
-                color: 'var(--color-emerald)',
-                zIndex: 12,
-                animation: 'fadeIn 0.3s ease'
+                gap: '8px'
               }}>
-                <CheckCircle2 size={64} style={{ 
-                  animation: 'signalPulse 1.5s infinite',
-                  color: 'var(--color-emerald)',
-                  filter: 'drop-shadow(0 0 10px var(--color-emerald))'
-                }} />
-                <p style={{ fontFamily: 'Orbitron', marginTop: '16px', fontWeight: 'bold', fontSize: '1rem' }}>
-                  {successMsg}
-                </p>
+                <AlertTriangle size={16} />
+                <span>{errorMsg}</span>
               </div>
             )}
 
-            {/* Scan Laser Scan Effect */}
-            {isScanning && (
-              <>
-                <div style={{
-                  position: 'absolute',
-                  left: 0,
-                  width: '100%',
-                  height: '4px',
-                  background: 'var(--color-cyan)',
-                  boxShadow: '0 0 15px var(--color-cyan)',
-                  animation: 'laserScan 2s ease-in-out infinite',
-                  zIndex: 10
-                }} />
-                <div style={{
-                  position: 'absolute',
-                  top: '10%',
-                  left: '10%',
-                  right: '10%',
-                  bottom: '10%',
-                  border: '1px dashed rgba(0, 243, 255, 0.4)',
-                  borderRadius: '50%',
-                  animation: 'signalPulse 1.5s infinite',
-                  zIndex: 9
-                }} />
-              </>
+            {/* Success Message */}
+            {successMsg && (
+              <div className="glass-panel" style={{
+                padding: '12px 18px',
+                background: 'rgba(0, 255, 136, 0.1)',
+                border: '1px solid var(--color-emerald)',
+                color: 'var(--color-emerald)',
+                borderRadius: '12px',
+                fontSize: '0.85rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '8px'
+              }}>
+                <CheckCircle2 size={16} />
+                <span>{successMsg}</span>
+              </div>
             )}
 
-            {/* Camera Offline HUD */}
-            {!cameraActive && !capturedPhoto && !isScanning && (
-              <div style={{
-                position: 'absolute',
-                top: 0,
-                left: 0,
-                width: '100%',
-                height: '100%',
-                display: 'flex',
-                flexDirection: 'column',
-                alignItems: 'center',
-                justifyContent: 'center',
-                background: 'rgba(5, 5, 21, 0.85)',
-                color: 'var(--text-muted)',
-                padding: '20px',
-                textAlign: 'center'
-              }}>
-                <Camera size={36} style={{ opacity: 0.3, marginBottom: '12px' }} />
-                {Object.keys(validationErrors).length > 0 ? (
-                  <>
-                    <p style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-red)' }}>🔒 Face scanning locked</p>
-                    <p style={{ fontSize: '0.75rem', opacity: 0.7, marginTop: '4px' }}>
-                      Please correct all form validation errors on the left to unlock scanning.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <p style={{ fontSize: '0.85rem', fontWeight: 600 }}>Biometric camera linked: standby</p>
-                    <p style={{ fontSize: '0.75rem', opacity: 0.7, marginTop: '4px' }}>
-                      Click below to activate camera and start biometric capture.
-                    </p>
-                  </>
+            {/* Full Name & Employee ID */}
+            <div className="cyber-input-group">
+              <label className="cyber-input-label">Personnel Full Name *</label>
+              <input 
+                type="text" 
+                className="cyber-input" 
+                placeholder="e.g. Bruce Wayne" 
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+                disabled={isScanning}
+                required
+              />
+              {validationErrors.fullName && (
+                <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
+                  {validationErrors.fullName}
+                </span>
+              )}
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+              <div className="cyber-input-group">
+                <label className="cyber-input-label">Gender *</label>
+                <select 
+                  className="cyber-input cyber-select"
+                  value={gender}
+                  onChange={(e) => setGender(e.target.value)}
+                  disabled={isScanning}
+                >
+                  <option value="Male">Male</option>
+                  <option value="Female">Female</option>
+                  <option value="Other">Other</option>
+                </select>
+                {validationErrors.gender && (
+                  <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
+                    {validationErrors.gender}
+                  </span>
                 )}
               </div>
-            )}
+              <div className="cyber-input-group">
+                <label className="cyber-input-label">Age *</label>
+                <input 
+                  type="number" 
+                  className="cyber-input" 
+                  placeholder="e.g. 34" 
+                  value={age}
+                  onChange={(e) => setAge(e.target.value === '' ? '' : Number(e.target.value))}
+                  disabled={isScanning}
+                  min={1}
+                  max={120}
+                />
+                {validationErrors.age && (
+                  <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
+                    {validationErrors.age}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+              <div className="cyber-input-group">
+                <label className="cyber-input-label">Designation / Role *</label>
+                <select 
+                  className="cyber-input cyber-select"
+                  value={designation}
+                  onChange={(e) => setDesignation(e.target.value)}
+                  disabled={isScanning}
+                >
+                  <option value="Staff Officer">Staff Officer</option>
+                  <option value="Administrator">Administrator</option>
+                  <option value="Security Officer">Security Officer</option>
+                  <option value="Technician">Technician</option>
+                  <option value="Engineer">Engineer</option>
+                  <option value="VIP">VIP</option>
+                  <option value="Contractor">Contractor</option>
+                </select>
+                {validationErrors.designation && (
+                  <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
+                    {validationErrors.designation}
+                  </span>
+                )}
+              </div>
+              <div className="cyber-input-group">
+                <label className="cyber-input-label">Department / Branch *</label>
+                <input 
+                  type="text" 
+                  className="cyber-input" 
+                  placeholder="e.g. Computer Science / R&D" 
+                  value={department}
+                  onChange={(e) => setDepartment(e.target.value)}
+                  disabled={isScanning}
+                  required
+                />
+                {validationErrors.department && (
+                  <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
+                    {validationErrors.department}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+              <div className="cyber-input-group">
+                <label className="cyber-input-label">Email Address *</label>
+                <input 
+                  type="email" 
+                  className="cyber-input" 
+                  placeholder="e.g. bruce@wayne.com" 
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  disabled={isScanning}
+                  required
+                />
+                {validationErrors.email && (
+                  <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
+                    {validationErrors.email}
+                  </span>
+                )}
+              </div>
+              <div className="cyber-input-group">
+                <label className="cyber-input-label">Mobile Number *</label>
+                <input 
+                  type="text" 
+                  className="cyber-input" 
+                  placeholder="e.g. 9876543210" 
+                  value={mobileNumber}
+                  onChange={(e) => setMobileNumber(e.target.value)}
+                  disabled={isScanning}
+                  required
+                />
+                {validationErrors.mobileNumber && (
+                  <span style={{ color: 'var(--color-red)', fontSize: '0.72rem', marginTop: '2px', display: 'block' }}>
+                    {validationErrors.mobileNumber}
+                  </span>
+                )}
+              </div>
+            </div>
+
+
+
+            {/* Action Buttons */}
+            <div style={{ display: 'flex', gap: '12px', marginTop: '12px', justifyContent: 'center' }}>
+              <button 
+                type="submit" 
+                className="btn-3d btn-cyan" 
+                style={{ padding: '10px 20px', fontSize: '0.85rem', borderRadius: '10px', minWidth: '150px' }}
+                disabled={isScanning || !capturedPhoto || isSubmitting}
+              >
+                {isSubmitting ? (
+                  <>
+                    <RefreshCw className="animate-spin" size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                    Registering...
+                  </>
+                ) : 'Complete Registration'}
+              </button>
+              <button 
+                type="button" 
+                className="btn-3d btn-secondary" 
+                style={{ padding: '10px 20px', fontSize: '0.85rem', borderRadius: '10px', minWidth: '130px' }}
+                onClick={() => {
+                  cancelScan();
+                  onCancel();
+                }}
+                disabled={isSubmitting}
+              >
+                {isScanning ? '⏹ Stop & Cancel' : 'Cancel'}
+              </button>
+            </div>
+
           </div>
 
-          {/* Capture Trigger Button */}
-          {Object.keys(validationErrors).length > 0 ? (
-            <button 
-              type="button" 
-              className="btn-3d btn-secondary" 
-              style={{ width: '100%', cursor: 'not-allowed' }}
-              disabled
-            >
-              🔒 Complete Fields to Unlock Scanner
-            </button>
-          ) : !cameraActive ? (
-            <button 
-              type="button" 
-              className="btn-3d btn-cyan" 
-              style={{ width: '100%' }}
-              onClick={() => setCameraActive(true)}
-            >
-              <Camera size={18} />
-              Initialize Biometric Scanner
-            </button>
-          ) : !capturedPhoto ? (
-            <button 
-              type="button" 
-              className="btn-3d btn-cyan" 
-              style={{ width: '100%' }}
-              onClick={handleCapture}
-              disabled={isScanning || !modelsLoaded}
-            >
-              <Camera size={18} />
-              {isScanning ? `Extracting descriptors (${capturedCount}/12)` : 'Start 12-Frame Biometric Scan'}
-            </button>
-          ) : (
-            <button 
-              type="button" 
-              className="btn-3d btn-purple" 
-              style={{ width: '100%' }}
-              onClick={handleRecapture}
-              disabled={isScanning}
-            >
-              <RefreshCw size={18} />
-              Recapture Biometric Template
-            </button>
-          )}
-
-          {/* Scanning Progress Bar */}
-          {isScanning && (
-            <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '6px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.72rem', color: 'var(--color-cyan)', fontFamily: 'Orbitron' }}>
-                <span>{scanStepLabel}</span>
-                <span>{scanProgress}%</span>
-              </div>
-              <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', overflow: 'hidden' }}>
-                <div style={{ width: `${scanProgress}%`, height: '100%', background: 'linear-gradient(90deg, var(--color-cyan), var(--color-purple))', transition: 'width 0.1s ease' }} />
-              </div>
+          {/* Right Column: 5-Angle Biometric Face Scanner */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span className="cyber-input-label" style={{ margin: 0 }}>5-Angle Biometric Capture *</span>
+              <span style={{ fontSize: '0.74rem', color: 'var(--color-cyan)', fontFamily: 'Orbitron' }}>
+                {capturedCount}/10 Samples ({Math.min(5, Math.floor(capturedCount / 2))}/5 Angles)
+              </span>
             </div>
-          )}
 
-          {/* Image swatches preview */}
-          {capturedPreviews.length > 0 && (
+            {/* Video Viewport */}
+            <div style={{
+              position: 'relative',
+              width: '100%',
+              aspectRatio: '4/3',
+              background: '#010108',
+              border: '1px solid var(--border-glass)',
+              borderRadius: '16px',
+              overflow: 'hidden',
+              boxShadow: 'var(--shadow-3d)'
+            }}>
+              {cameraActive && !capturedPhoto && (
+                <video 
+                  ref={videoRef}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover'
+                  }}
+                  muted
+                  playsInline
+                />
+              )}
+
+              <canvas ref={canvasRef} width={400} height={300} style={{ display: 'none' }} />
+
+              {capturedPhoto && (
+                <img 
+                  src={capturedPhoto} 
+                  alt="Primary Captured Biometric" 
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%',
+                    objectFit: 'cover'
+                  }}
+                />
+              )}
+
+              {/* Completion Overlay */}
+              {capturedPhoto && (
+                <div style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: '100%',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: 'rgba(1, 1, 8, 0.75)',
+                  color: 'var(--color-emerald)',
+                  zIndex: 12
+                }}>
+                  <CheckCircle2 size={58} style={{ 
+                    color: 'var(--color-emerald)',
+                    filter: 'drop-shadow(0 0 10px var(--color-emerald))'
+                  }} />
+                  <p style={{ fontFamily: 'Orbitron', marginTop: '12px', fontWeight: 'bold', fontSize: '0.95rem' }}>
+                    All 5 Angles Enrolled Successfully
+                  </p>
+                </div>
+              )}
+
+              {/* Laser Scanning Animation */}
+              {isScanning && (
+                <>
+                  <div style={{
+                    position: 'absolute',
+                    left: 0,
+                    width: '100%',
+                    height: '3px',
+                    background: 'var(--color-cyan)',
+                    boxShadow: '0 0 15px var(--color-cyan)',
+                    animation: 'laserScan 2s ease-in-out infinite',
+                    zIndex: 10
+                  }} />
+                  <div style={{
+                    position: 'absolute',
+                    top: '12%',
+                    left: '12%',
+                    right: '12%',
+                    bottom: '12%',
+                    border: '1px dashed rgba(0, 243, 255, 0.4)',
+                    borderRadius: '50%',
+                    animation: 'signalPulse 1.5s infinite',
+                    zIndex: 9
+                  }} />
+                </>
+              )}
+
+              {/* Camera Offline HUD */}
+              {!cameraActive && !capturedPhoto && !isScanning && (
+                <div style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  width: '100%',
+                  height: '100%',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  background: 'rgba(5, 5, 21, 0.85)',
+                  color: 'var(--text-muted)',
+                  padding: '20px',
+                  textAlign: 'center'
+                }}>
+                  <Camera size={36} style={{ opacity: 0.3, marginBottom: '12px' }} />
+                  {Object.keys(validationErrors).length > 0 ? (
+                    <>
+                      <p style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-red)', margin: 0 }}>
+                        🔒 Face Scanning Locked
+                      </p>
+                      <p style={{ fontSize: '0.74rem', opacity: 0.7, marginTop: '4px' }}>
+                        Please resolve all form errors on the left to unlock scanner.
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p style={{ fontSize: '0.85rem', fontWeight: 600, margin: 0 }}>Biometric Camera Ready</p>
+                      <p style={{ fontSize: '0.74rem', opacity: 0.7, marginTop: '4px' }}>
+                        Click below to start 5-angle biometric facial enrollment.
+                      </p>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* 5-Angle Visual Step Grid */}
             <div style={{
               display: 'grid',
-              gridTemplateColumns: 'repeat(6, 1fr)',
-              gap: '6px',
-              maxHeight: '80px',
-              overflowY: 'auto',
-              width: '100%',
-              padding: '6px',
-              border: '1px solid var(--border-glass)',
-              borderRadius: '8px'
+              gridTemplateColumns: 'repeat(5, 1fr)',
+              gap: '8px',
+              width: '100%'
             }}>
-              {capturedPreviews.map((img, idx) => (
-                <img key={idx} src={img} alt="scan slice" style={{ width: '100%', borderRadius: '4px', aspectRatio: 1, objectFit: 'cover' }} />
-              ))}
+              {ANGLE_STAGES.map((stage, idx) => {
+                const count = angleFrameCounts[stage.key] || 0;
+                const isPassed = count >= stage.targetCount;
+                const isCurrent = isScanning && currentAngleStageIndex === idx;
+                const previewImg = anglePreviews[stage.key];
+
+                return (
+                  <div 
+                    key={stage.key}
+                    style={{
+                      padding: '8px 4px',
+                      borderRadius: '8px',
+                      border: isPassed 
+                        ? '1px solid var(--color-emerald)' 
+                        : isCurrent 
+                          ? '1px solid var(--color-cyan)' 
+                          : '1px solid var(--border-glass)',
+                      background: isPassed 
+                        ? 'rgba(0, 255, 136, 0.08)' 
+                        : isCurrent 
+                          ? 'rgba(0, 243, 255, 0.08)' 
+                          : 'rgba(5, 5, 21, 0.4)',
+                      textAlign: 'center',
+                      position: 'relative',
+                      overflow: 'hidden',
+                      transition: 'all 0.2s ease'
+                    }}
+                  >
+                    {previewImg && (
+                      <img 
+                        src={previewImg} 
+                        alt={stage.name} 
+                        style={{
+                          width: '100%',
+                          aspectRatio: '1',
+                          borderRadius: '4px',
+                          objectFit: 'cover',
+                          marginBottom: '4px'
+                        }}
+                      />
+                    )}
+                    <div style={{
+                      fontSize: '0.66rem',
+                      fontWeight: 700,
+                      color: isPassed ? 'var(--color-emerald)' : isCurrent ? 'var(--color-cyan)' : 'var(--text-muted)',
+                      textTransform: 'uppercase'
+                    }}>
+                      {stage.shortLabel}
+                    </div>
+                    <div style={{ fontSize: '0.62rem', color: isPassed ? 'var(--color-emerald)' : 'var(--text-muted)' }}>
+                      {isPassed ? '✓ Complete' : isCurrent ? 'Active...' : `${count}/${stage.targetCount}`}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          )}
 
-        </div>
+            {/* Scanner Controls */}
+            {Object.keys(validationErrors).length > 0 ? (
+              <button 
+                type="button" 
+                className="btn-3d btn-secondary" 
+                style={{ width: '100%', cursor: 'not-allowed' }}
+                disabled
+              >
+                🔒 Fill Required Fields to Unlock Scanner
+              </button>
+            ) : !cameraActive ? (
+              <button 
+                type="button" 
+                className="btn-3d btn-cyan" 
+                style={{ width: '100%' }}
+                onClick={() => setCameraActive(true)}
+              >
+                <Camera size={16} />
+                Activate Camera
+              </button>
+            ) : !capturedPhoto ? (
+              <button 
+                type="button" 
+                className="btn-3d btn-cyan" 
+                style={{ width: '100%' }}
+                onClick={handleCapture}
+                disabled={isScanning || !modelsLoaded}
+              >
+                <Camera size={16} />
+                {isScanning 
+                  ? `Scanning Angle ${currentAngleStageIndex + 1}/5 (${capturedCount}/10)` 
+                  : 'Start 5-Angle Biometric Scan'}
+              </button>
+            ) : (
+              <button 
+                type="button" 
+                className="btn-3d btn-purple" 
+                style={{ width: '100%' }}
+                onClick={handleRecapture}
+                disabled={isScanning}
+              >
+                <RefreshCw size={16} />
+                Recapture Biometric Angles
+              </button>
+            )}
 
-      </form>
+            {/* Scanning Progress Bar & Instruction Guide */}
+            {isScanning && (
+              <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                <div style={{
+                  padding: '8px 12px',
+                  borderRadius: '8px',
+                  background: 'rgba(0, 243, 255, 0.08)',
+                  border: '1px solid rgba(0, 243, 255, 0.25)',
+                  fontSize: '0.75rem',
+                  color: 'var(--color-cyan)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px'
+                }}>
+                  <Compass size={16} className="animate-spin" style={{ animation: 'spin 3s linear infinite' }} />
+                  <span>{scanStepLabel}</span>
+                </div>
+
+                <div style={{ width: '100%', height: '8px', background: 'rgba(255,255,255,0.05)', borderRadius: '4px', overflow: 'hidden' }}>
+                  <div style={{ 
+                    width: `${scanProgress}%`, 
+                    height: '100%', 
+                    background: 'linear-gradient(90deg, var(--color-cyan), var(--color-purple))', 
+                    transition: 'width 0.15s ease' 
+                  }} />
+                </div>
+              </div>
+            )}
+
+            {/* Captured preview thumbnails */}
+            {capturedPreviews.length > 0 && !isScanning && (
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(5, 1fr)',
+                gap: '6px',
+                width: '100%',
+                padding: '6px',
+                border: '1px solid var(--border-glass)',
+                borderRadius: '8px',
+                background: 'rgba(5, 5, 21, 0.3)'
+              }}>
+                {capturedPreviews.slice(0, 10).map((img, idx) => (
+                  <div key={idx} style={{ position: 'relative' }}>
+                    <img 
+                      src={img} 
+                      alt="face frame" 
+                      style={{ width: '100%', borderRadius: '4px', aspectRatio: 1, objectFit: 'cover' }} 
+                    />
+                    <div style={{
+                      position: 'absolute',
+                      bottom: 0,
+                      left: 0,
+                      right: 0,
+                      background: 'rgba(0,0,0,0.7)',
+                      fontSize: '0.58rem',
+                      color: 'var(--color-cyan)',
+                      textAlign: 'center'
+                    }}>
+                      {ANGLE_STAGES[Math.min(4, Math.floor(idx / 2))]?.name.split(' ')[0]}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+          </div>
+
+        </form>
+      )}
+
     </div>
   );
 };

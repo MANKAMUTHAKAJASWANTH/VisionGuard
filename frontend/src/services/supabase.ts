@@ -111,6 +111,39 @@ export async function uploadImageToSupabase(
 }
 
 // ---------------------------------------------------------------------------
+// Upload unauthorized detection snapshot directly to bucket 'detection-snapshots' or 'face-images'
+// ---------------------------------------------------------------------------
+export async function uploadDetectionSnapshotToSupabase(
+  base64Data: string,
+  logId: string
+): Promise<string | null> {
+  if (!supabase) return null;
+  try {
+    const blob = await fetch(base64Data).then(res => res.blob());
+    const path = `unauthorized_snapshots/${logId}_${Date.now()}.jpg`;
+
+    // Upload to face-images bucket under unauthorized_snapshots folder
+    const { error } = await supabase.storage
+      .from('face-images')
+      .upload(path, blob, {
+        contentType: 'image/jpeg',
+        upsert: true,
+      });
+
+    if (error) {
+      console.error('[Supabase Storage] Unauthorized snapshot upload error:', error);
+      return null;
+    }
+
+    const { data } = supabase.storage.from('face-images').getPublicUrl(path);
+    return data.publicUrl;
+  } catch (err) {
+    console.error('[Supabase Storage] Exception uploading unauthorized snapshot:', err);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Delete all files inside Supabase Storage bucket 'face-images' under user folder
 // ---------------------------------------------------------------------------
 export async function deleteUserImagesFromSupabase(userId: string): Promise<void> {
