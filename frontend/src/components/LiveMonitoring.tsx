@@ -1769,6 +1769,58 @@ export const LiveMonitoring: React.FC<LiveMonitoringProps> = ({
                   <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', display: 'block', marginTop: '2px' }}>
                     {arduinoConnected ? 'COM Port Linked' : 'No Arduino Detected'}
                   </span>
+                  {!arduinoConnected ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const ok = await serialService.requestAndConnect(9600);
+                          if (ok) {
+                            triggerNotification('🟢 Arduino Connected! Hardware alarm armed.');
+                            setTimeout(() => serialService.sendCommand('TEST_LED'), 400);
+                          }
+                        } catch (err: any) {
+                          triggerNotification('❌ Serial Error: ' + (err.message || 'Check USB cable'));
+                        }
+                      }}
+                      style={{
+                        marginTop: '8px',
+                        fontSize: '0.72rem',
+                        padding: '6px 8px',
+                        width: '100%',
+                        background: 'linear-gradient(135deg, #00f0ff 0%, #0077ff 100%)',
+                        color: '#000',
+                        fontWeight: 700,
+                        border: 'none',
+                        borderRadius: '6px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      ⚡ Connect Arduino
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await serialService.sendCommand('TEST_BUZZER');
+                        triggerNotification('🔔 Testing Arduino Buzzer & LED...');
+                      }}
+                      style={{
+                        marginTop: '8px',
+                        fontSize: '0.72rem',
+                        padding: '6px 8px',
+                        width: '100%',
+                        background: 'rgba(0, 255, 170, 0.15)',
+                        color: '#00ffaa',
+                        fontWeight: 600,
+                        border: '1px solid #00ffaa',
+                        borderRadius: '6px',
+                        cursor: 'pointer'
+                      }}
+                    >
+                      🔔 Test Buzzer & LED
+                    </button>
+                  )}
                 </div>
                 <div className="glass-panel" style={{ padding: '12px', background: 'rgba(255,255,255,0.02)' }}>
                   <span style={{ fontSize: '0.65rem', color: 'var(--text-muted)', display: 'block' }}>Alarm Audio</span>
